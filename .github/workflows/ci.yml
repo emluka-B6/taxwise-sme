@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: lint, types, tests, migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: taxwise
+          POSTGRES_PASSWORD: taxwise
+          POSTGRES_DB: taxwise
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U taxwise -d taxwise"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # Local default; individual migration steps override it (including Postgres).
+      DATABASE_URL: sqlite+pysqlite:///./ci.db
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,postgres]"
+
+      - name: Ruff check
+        run: ruff check .
+
+      - name: Mypy (app)
+        run: mypy app
+
+      - name: Pytest
+        run: pytest -q
+
+      - name: Alembic upgrade head on a clean SQLite database
+        run: |
+          rm -f ci.db
+          alembic upgrade head
+          alembic check   # fails if the migration drifts from the ORM metadata
+
+      - name: Alembic upgrade head on a clean PostgreSQL database
+        env:
+          DATABASE_URL: postgresql+psycopg://taxwise:taxwise@localhost:5432/taxwise
+        run: |
+          alembic upgrade head
+          alembic check
+          alembic downgrade base
+          alembic upgrade head
