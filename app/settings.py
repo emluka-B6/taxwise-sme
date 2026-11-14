@@ -8,14 +8,18 @@ the ``tax_year_params`` table so that a rate change never requires a code change
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
+from pathlib import Path
+from typing import Final, Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ALLOWED_DATABASE_SCHEMES = frozenset({"sqlite", "postgresql"})
 
-__all__ = ["ALLOWED_DATABASE_SCHEMES", "Settings", "get_settings"]
+#: Default root of the content-addressed upload storage; ``DOCUMENTS_DIR`` overrides it.
+DOCUMENTS_DIR: Final[Path] = Path("documents")
+
+__all__ = ["ALLOWED_DATABASE_SCHEMES", "DOCUMENTS_DIR", "Settings", "get_settings"]
 
 
 class Settings(BaseSettings):
@@ -34,6 +38,7 @@ class Settings(BaseSettings):
     debug: bool = False
     database_url: str = "sqlite+pysqlite:///./taxwise.db"
     sql_echo: bool = False
+    documents_dir: Path = DOCUMENTS_DIR
 
     @field_validator("database_url")
     @classmethod

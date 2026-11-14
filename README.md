@@ -44,14 +44,14 @@ alembic upgrade head
 app/
   main.py            # FastAPI app factory + ASGI entrypoint
   settings.py        # pydantic-settings (DATABASE_URL, ENVIRONMENT, ...)
-  api/               # routers: health, tax_params, deadlines, decisions
+  api/               # routers: health, tax_params, deadlines, decisions, documents
   domain/            # pure enums, no infrastructure imports
   db/
     base.py          # DeclarativeBase + deterministic naming convention
     types.py         # JSONType, EmbeddingVector, sa_enum (cross-dialect)
     models.py        # all ORM models
     session.py       # lazy engine/session factories, FastAPI dependency
-  services/          # tax params loader, deadline calendar, ingestion
+  services/          # tax params loader, deadline calendar, ingest, classifier, storage
   integrations/      # inFakt / Fakturownia / wFirma adapters (Protocol only)
   assistant/         # retrieval-augmented answers, citations (Protocol only)
 config/
@@ -75,6 +75,7 @@ All settings are environment variables (or `.env`), parsed by `app.settings.Sett
 | `ENVIRONMENT` | `local` | `local`, `test`, `staging`, `prod` |
 | `DEBUG` | `false` | Passed to FastAPI |
 | `SQL_ECHO` | `false` | SQLAlchemy statement logging |
+| `DOCUMENTS_DIR` | `./documents` | Content-addressed upload storage root (`app/services/storage.py`); gitignored |
 
 Tax rates and thresholds are **not** settings and **not** constants: they are rows in
 `tax_year_params` (versioned, source-linked) and per-taxpayer values in `tax_profiles`.
@@ -139,6 +140,44 @@ read and rejected on write.
 VAT cadence is passed to the generator rather than stored on `tax_profiles` (the profile
 schema carries no cadence column yet), so monthly and quarterly filers are both modelled
 without a schema change.
+
+## Document intake
+
+`POST /api/documents` accepts one multipart file (field `file`) of at most **10 MB** and
+stores it content-addressed under `DOCUMENTS_DIR`:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/documents` | Upload a PDF/XML/CSV file; `201` with the row, `409` + `existing_id` on duplicate content |
+| `PATCH /api/documents/{id}` | Correct the heuristic `type` and/or the `status` (`NEW`, `CLASSIFIED`, `VERIFIED`, `ARCHIVED`) |
+
+The intake pipeline (`app/api/documents.py`, `app/services/classifier.py`,
+`app/services/storage.py`) runs these steps before a row is created:
+
+1. **Name** - only a bare file name with an allowlisted extension (`.pdf`, `.xml`,
+   `.csv`) is accepted; separators, `..`, NUL bytes and hidden names are rejected with
+   `400/415`, never sanitised into a path.
+2. **MIME** - the declared content type must be plausible for the extension
+   (`application/pdf`; `application/xml`, `text/xml`, `*+xml`; `text/csv`,
+   `application/csv`, `text/plain`), otherwise `415`.
+3. **Magic bytes** - the payload must actually look like the declared format (`%PDF-`,
+   an XML prolog/root element, or decodable text for CSV), otherwise `415`; files above
+   10 MB are rejected with `413` before they are buffered.
+4. **Dedupe** - `sha256` of the bytes is looked up first; an existing row returns `409`
+   with `{"detail": {"message": ..., "existing_id": <id>}}` and no second file is written.
+5. **Write** - bytes go to a hidden temporary file in `DOCUMENTS_DIR`, are fsynced, then
+   hard-linked as `<sha256><extension>`; `os.link` is atomic and refuses to overwrite, so
+   no duplicate or partial file can appear.
+6. **Classify** - ordered, case/diacritic-insensitive rules over the file name first and
+   a 64 KB content prefix second (`faktura`, `FA(`, `JPK`, `ZUS DRA`, `PIT-`,
+   `deklaracja`); anything unrecognised becomes `OTHER` and can be corrected via `PATCH`.
+
+The client file name is used only as a classification hint and is never part of a
+filesystem path. Logging is limited to the document id and byte size - contents, client
+file names and storage paths are not logged.
+
+A raw upload has no parsed amount/date yet, so `issue_date`/`period` default to the
+Warsaw date and `amount_gross` is stored as `0.00`; extraction is a later pipeline step.
 
 
 ## Data model
@@ -243,6 +282,11 @@ Coverage highlights:
 * `sha256` / `file_path` are nullable because `MANUAL` documents may have no file. The
   `sha256` index supports content dedupe; `UNIQUE(source, external_id)` covers importer
   idempotency (NULL `external_id` rows are treated as distinct by both dialects).
+* Upload dedupe is an application-level lookup on the `sha256` index, not a `UNIQUE`
+  constraint, so two *concurrent* identical uploads can both insert; promoting the index
+  to unique is a one-migration change when strict concurrency guarantees are needed.
+  `file_path` stores the content-addressed name (`<sha256><extension>`), not an absolute
+  path, so the storage root can be relocated or mounted elsewhere.
 * `period` is free-form text (`2026-03`, `2026-Q1`); format validation belongs to the API
   layer, not to the DB.
 * `deadline_kind` / `deadline_status` / all other enum members are the minimum agreed set
