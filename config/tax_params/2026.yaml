@@ -1,0 +1,91 @@
+# Legal parameters in force for tax year 2026.
+#
+# Same schema as `2025.yaml`; the file is keyed by year, so a rate change never touches
+# Python code - it is a new file (or a new `version` of this one) plus a re-run of
+# `python scripts/seed_tax_params.py`.
+year: 2026
+version: 1
+source_url: https://isap.sejm.gov.pl/isap.nsf/DocDetails.xsp?id=WDU19910800350
+effective_from: 2026-01-01
+notes: >-
+  Parameters for 2026, derived from the PIT act as amended for that year; VAT also follows
+  ustawa o VAT (https://isap.sejm.gov.pl/isap.nsf/DocDetails.xsp?id=WDU20040540535) and ZUS
+  the annual ZUS announcement
+  (https://www.zus.pl/baza-wiedzy/skladki-wskazniki-odsetki/skladki). The VAT exemption
+  threshold reflects the raise available under the EU SME package; the PIT scale and the
+  tax-free amount are unchanged. ZUS figures use the projected average wage for 2026
+  (60% base) and the minimum health-contribution base (75% of the minimum wage); they are
+  planning values, so re-verify them against the cited sources before filing.
+
+pit:
+  scale:
+    tax_free_amount: 30000
+    rates:
+      - threshold: 120000
+        rate: 0.12
+      - threshold: null      # open-ended top bracket
+        rate: 0.32
+  linear:
+    rate: 0.19
+  lump_sum:
+    # Unchanged with respect to 2025 (see 2025.yaml for the PKD mapping).
+    rates_by_pkd:
+      "4711": 0.03
+      "4321": 0.055
+      "5610": 0.085
+      "6201": 0.12
+      "6920": 0.15
+  ip_box:
+    rate: 0.05
+
+vat:
+  exemption_threshold_pln: 240000
+  # Ascending and distinct, as validated by the loader.
+  rates:
+    - 0.0
+    - 0.05
+    - 0.08
+    - 0.23
+
+zus:
+  # Quoted decimals keep money exact (see 2025.yaml); components must add up to the total.
+  components:
+    - name: emerytalna
+      base: "5481.00"
+      rate: 0.1952
+    - name: rentowa
+      base: "5481.00"
+      rate: 0.08
+    - name: chorobowa
+      base: "5481.00"
+      rate: 0.0245
+    - name: wypadkowa
+      base: "5481.00"
+      rate: 0.0167
+    - name: fundusz_pracy
+      base: "5481.00"
+      rate: 0.0245
+    - name: fgsp
+      base: "5481.00"
+      rate: 0.001
+    - name: zdrowotna_min
+      base: "3604.50"
+      rate: 0.09
+  total_full_pln: "2198.35"
+
+deadlines:
+  - kind: VAT_DECLARATION
+    rule: vat_monthly
+    offset_days: 25
+  - kind: VAT_DECLARATION
+    rule: vat_quarterly
+    offset_days: 25
+  - kind: ZUS_CONTRIBUTION
+    rule: zus_dra
+    offset_days: 20
+  - kind: PIT_ADVANCE
+    rule: pit_advance_monthly
+    offset_days: 20
+  - kind: PIT_ANNUAL
+    rule: pit_annual
+    offset_days: 120

@@ -10,10 +10,13 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db.base import Base
+from app.db.session import get_session
+from app.main import create_app
 from app.settings import get_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -43,3 +46,15 @@ def session(sqlite_engine: Engine) -> Iterator[Session]:
     with factory() as db_session:
         yield db_session
         db_session.rollback()
+
+
+@pytest.fixture
+def api_client(session: Session) -> Iterator[TestClient]:
+    """``TestClient`` wired to the per-test session instead of the global engine."""
+    application = create_app()
+    application.dependency_overrides[get_session] = lambda: session
+    try:
+        with TestClient(application) as client:
+            yield client
+    finally:
+        application.dependency_overrides.clear()

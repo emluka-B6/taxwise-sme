@@ -14,6 +14,7 @@ dependencies = [
     "fastapi>=0.115",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
+    "pyyaml>=6.0",
     "sqlalchemy>=2.0.30",
     "uvicorn[standard]>=0.30",
 ]
@@ -24,6 +25,7 @@ dev = [
     "mypy>=1.10",
     "pytest>=8.2",
     "ruff>=0.5",
+    "types-pyyaml>=6.0",
 ]
 postgres = ["psycopg[binary]>=3.2"]
 
@@ -63,3 +65,9 @@ strict = true
 warn_unused_ignores = true
 show_error_codes = true
 pretty = true
+
+# PyYAML ships no py.typed marker; `types-pyyaml` (dev extra) provides the stubs and this
+# override keeps `mypy app` clean on machines where only the runtime dependency is present.
+[[tool.mypy.overrides]]
+module = ["yaml"]
+ignore_missing_imports = true

@@ -142,6 +142,10 @@ class Deadline(Base):
 
     __tablename__ = "deadlines"
     __table_args__ = (
+        # Idempotency key of the generator: re-running it must not duplicate obligations.
+        UniqueConstraint(
+            "kind", "period", "due_date", name="uq_deadlines_kind_period_due_date"
+        ),
         Index("ix_deadlines_due_date", "due_date"),
         Index("ix_deadlines_period", "period"),
     )
@@ -155,8 +159,9 @@ class Deadline(Base):
     status: Mapped[DeadlineStatus] = mapped_column(
         sa_enum(DeadlineStatus, name="deadline_status"),
         nullable=False,
-        default=DeadlineStatus.PENDING,
-        server_default=DeadlineStatus.PENDING.value,
+        default=DeadlineStatus.OPEN,
+        server_default=DeadlineStatus.OPEN.value,
+        doc="Stored state; OVERDUE is derived from due_date in Europe/Warsaw, see services.",
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 

@@ -1,0 +1,102 @@
+# Legal parameters in force for tax year 2025.
+#
+# This file is *data*: `app/services/tax_params.py` validates it and stores it in the
+# `tax_year_params` table. No rate or threshold may be duplicated in Python code - the
+# `tests/test_no_hardcoded_rates.py` policy check enforces that.
+#
+# Every change must bump `version` (the row is keyed by year + version) and keep
+# `source_url` / `effective_from` accurate: both are returned by `GET /api/tax-params/2025`
+# and stored next to the payload, so a figure can always be traced back to its source.
+year: 2025
+version: 1
+# Specific document (not a section landing page): ustawa o podatku dochodowym od osob
+# fizycznych, Dz.U. 1991 nr 80 poz. 350, with the wording in force during the year.
+source_url: https://isap.sejm.gov.pl/isap.nsf/DocDetails.xsp?id=WDU19910800350
+effective_from: 2025-01-01
+notes: >-
+  Parameters for 2025. PIT values follow the PIT act; VAT follows ustawa o VAT
+  (https://isap.sejm.gov.pl/isap.nsf/DocDetails.xsp?id=WDU20040540535); ZUS contribution
+  bases and rates follow the ZUS "wysokosc skladek na ubezpieczenia spoleczne"
+  announcement (https://www.zus.pl/baza-wiedzy/skladki-wskazniki-odsetki/skladki).
+  ZUS figures are the "duzy ZUS" variant: social contributions, Fundusz Pracy and FGSP on
+  the 60% average-wage base, plus the *minimum* health contribution (75% of the minimum
+  wage) - the actual health contribution is a percentage of income and is computed
+  elsewhere. Verify each figure against the cited source before relying on it.
+
+pit:
+  scale:
+    tax_free_amount: 30000
+    rates:
+      - threshold: 120000
+        rate: 0.12
+      - threshold: null      # open-ended top bracket
+        rate: 0.32
+  linear:
+    rate: 0.19
+  lump_sum:
+    # Representative subset of the PKD matrix (ryczalt); the full matrix lives in the
+    # cited act. Keys are PKD 2007 class codes.
+    rates_by_pkd:
+      "4711": 0.03
+      "4321": 0.055
+      "5610": 0.085
+      "6201": 0.12
+      "6920": 0.15
+  ip_box:
+    rate: 0.05
+
+vat:
+  exemption_threshold_pln: 200000
+  # Ascending and distinct, as validated by the loader.
+  rates:
+    - 0.0
+    - 0.05
+    - 0.08
+    - 0.23
+
+zus:
+  # Money is written as quoted decimals so YAML never turns it into a binary float; the
+  # loader validates that components (base x rate) add up to total_full_pln.
+  components:
+    - name: emerytalna
+      base: "5203.80"
+      rate: 0.1952
+    - name: rentowa
+      base: "5203.80"
+      rate: 0.08
+    - name: chorobowa
+      base: "5203.80"
+      rate: 0.0245
+    - name: wypadkowa
+      base: "5203.80"
+      rate: 0.0167
+    - name: fundusz_pracy
+      base: "5203.80"
+      rate: 0.0245
+    - name: fgsp
+      base: "5203.80"
+      rate: 0.001
+    - name: zdrowotna_min
+      base: "3499.50"
+      rate: 0.09
+  # Sum of the rounded components above; validated against them on load.
+  total_full_pln: "2094.12"
+
+# Filing/payment calendar. The due date is always `period end + offset_days`, so the
+# calendar is data too: no due-date arithmetic in Python.
+deadlines:
+  - kind: VAT_DECLARATION
+    rule: vat_monthly
+    offset_days: 25
+  - kind: VAT_DECLARATION
+    rule: vat_quarterly
+    offset_days: 25
+  - kind: ZUS_CONTRIBUTION
+    rule: zus_dra
+    offset_days: 20
+  - kind: PIT_ADVANCE
+    rule: pit_advance_monthly
+    offset_days: 20
+  - kind: PIT_ANNUAL
+    rule: pit_annual
+    offset_days: 120

@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from app.api import health_router
+from app.api import (
+    deadlines_router,
+    decisions_router,
+    health_router,
+    tax_params_router,
+)
 from app.settings import Settings, get_settings
 
 __all__ = ["app", "create_app"]
@@ -19,6 +24,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         debug=resolved.debug,
     )
     application.include_router(health_router)
+    application.include_router(tax_params_router)
+    application.include_router(deadlines_router)
+    application.include_router(decisions_router)
     return application
 
 

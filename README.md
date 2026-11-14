@@ -44,19 +44,24 @@ alembic upgrade head
 app/
   main.py            # FastAPI app factory + ASGI entrypoint
   settings.py        # pydantic-settings (DATABASE_URL, ENVIRONMENT, ...)
-  api/               # routers; GET /health lives in api/health.py
+  api/               # routers: health, tax_params, deadlines, decisions
   domain/            # pure enums, no infrastructure imports
   db/
     base.py          # DeclarativeBase + deterministic naming convention
     types.py         # JSONType, EmbeddingVector, sa_enum (cross-dialect)
     models.py        # all ORM models
     session.py       # lazy engine/session factories, FastAPI dependency
-  services/          # tax math & ingestion (skeleton)
+  services/          # tax params loader, deadline calendar, ingestion
   integrations/      # inFakt / Fakturownia / wFirma adapters (Protocol only)
   assistant/         # retrieval-augmented answers, citations (Protocol only)
+config/
+  tax_params/        # 2025.yaml, 2026.yaml - legal parameters as data
+scripts/
+  seed_tax_params.py # idempotent loader: YAML -> tax_year_params
 alembic/
   env.py             # URL from DATABASE_URL, batch mode on SQLite
   versions/0001_initial.py
+  versions/0002_deadline_statuses_and_unique_key.py
 tests/               # schema, API, migration and policy tests
 ```
 
@@ -74,13 +79,75 @@ All settings are environment variables (or `.env`), parsed by `app.settings.Sett
 Tax rates and thresholds are **not** settings and **not** constants: they are rows in
 `tax_year_params` (versioned, source-linked) and per-taxpayer values in `tax_profiles`.
 
+## Tax parameters (`config/tax_params/<year>.yaml`)
+
+Every legal figure the assistant needs lives in a per-year YAML document: PIT scale,
+tax-free amount, flat and lump-sum rates, IP BOX rate, VAT exemption threshold and rates,
+ZUS components, and the filing calendar. Each document carries `source_url` (a specific
+official page), `effective_from`, `version` and `notes`, so a figure can always be traced
+back to the act or announcement it came from.
+
+```bash
+python scripts/seed_tax_params.py            # load every file (idempotent)
+python scripts/seed_tax_params.py --year 2026 --no-deadlines
+curl -s localhost:8000/api/tax-params/2026  # source_url + effective_from + payload
+```
+
+`app/services/tax_params.py` is the only reader:
+
+* `load(year)` → a frozen Pydantic model (cached per year, `clear_cache()` invalidates);
+* validation: scale thresholds strictly increasing (only the last bracket may be open),
+  rates are positive fractions, VAT rates distinct and ascending, `zus.components`
+  (base × rate) must add up to `zus.total_full_pln` within a cent, `effective_from` must
+  fall in the file's year, unknown keys are rejected, `source_url` must be a specific
+  document (not a site root), and each `deadlines[].rule` must match its `kind`;
+* `upsert(session, params)` → idempotent write keyed by `UNIQUE(year, version)`;
+* the payload is stored as JSON with decimals serialised as exact strings.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/tax-params/{year}` | Stored, validated document of the highest version (404 when the year was never seeded) |
+
+## Deadlines and decisions
+
+`app/services/deadlines.py` turns `<year>.yaml → deadlines[]` plus the active
+`TaxProfile` into `deadlines` rows. A rule never hardcodes a date: the due date is
+`period end + offset_days`, so changing a filing date is a YAML edit.
+
+| Rule | Obligation | Periods generated |
+| --- | --- | --- |
+| `vat_monthly` | VAT declaration and payment (VAT-registered, monthly) | 12 months |
+| `vat_quarterly` | VAT declaration and payment (quarterly filer) | 4 quarters |
+| `zus_dra` | ZUS DRA declaration and contributions | 12 months |
+| `pit_advance_monthly` | PIT advance | 12 months |
+| `pit_annual` | Annual PIT return/payment | the tax year (due next year) |
+
+Generation is idempotent (`UNIQUE(kind, period, due_date)`), never overwrites an existing
+row's status or notes, and reports `created`/`existing`. Statuses are `OPEN`, `DONE` and
+`OVERDUE`, where `OVERDUE` is *derived*: an `OPEN` deadline whose due date is before today
+in **Europe/Warsaw**. Legacy stored values (`PENDING`, `MISSED`, `WAIVED`) are normalised on
+read and rejected on write.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/deadlines?from=&to=&status=` | Deadlines in due-date order, filtered by range and derived status |
+| `PATCH /api/deadlines/{id}` | Mark `OPEN`/`DONE`/`OVERDUE` and/or add a note |
+| `POST /api/deadlines/generate` | `{"year": 2026, "vat_cadence": "monthly"\|"quarterly"}` - idempotent generation for the active profile (409 without one) |
+| `POST /api/decisions` | Append an auditable decision with `source_refs` (list of URLs); 409 on a duplicate `(topic, decided_at)` |
+| `GET /api/decisions?topic=&limit=` | Decisions newest first |
+
+VAT cadence is passed to the generator rather than stored on `tax_profiles` (the profile
+schema carries no cadence column yet), so monthly and quarterly filers are both modelled
+without a schema change.
+
+
 ## Data model
 
 | Table | Purpose | Key constraints |
 | --- | --- | --- |
 | `documents` | Invoices, ZUS/PIT statements, other paperwork + file metadata | `UNIQUE(source, external_id)` for importer idempotency, index on `sha256` (dedupe by content), index on `period` |
 | `tax_profiles` | Versioned taxpayer setup: PIT regime, VAT status, ZUS variant, IP BOX rate | `CHECK(valid_to IS NULL OR valid_to >= valid_from)` |
-| `deadlines` | Filing/payment obligations and their status | indexes on `due_date`, `period` |
+| `deadlines` | Filing/payment obligations and their status | `UNIQUE(kind, period, due_date)` (idempotent generation), indexes on `due_date`, `period` |
 | `decisions` | Append-only audit trail of tax decisions | `UNIQUE(topic, decided_at)` |
 | `knowledge_sources` | Official publications (MF, ZUS, ISAP) with content hash + version | index on `sha256` |
 | `knowledge_chunks` | Retrieval chunks; embedding is JSON **text** | `UNIQUE(source_id, ordinal)`, FK `ON DELETE CASCADE` |
@@ -147,6 +214,14 @@ Coverage highlights:
   check` (no drift), `downgrade base` reversibility, and offline PostgreSQL DDL rendering.
 * `tests/test_health.py` — `GET /health` → 200 `{"status": "ok", ...}`, OpenAPI, settings
   validation.
+* `tests/test_tax_params.py` — 2025/2026 load, invalid files (ZUS total, thresholds,
+  negative rate, typo key, wrong `effective_from`, rule/kind mismatch) are rejected,
+  seeding is idempotent, `(year, version)` versioning, the endpoint returns `source_url` +
+  `effective_from` and 404s for a missing year.
+* `tests/test_deadlines.py` — generation for a VAT+scale profile (12 VAT + 12 ZUS +
+  12 advances + 1 annual, due dates from the YAML offsets), idempotency, quarterly VAT,
+  VAT-exempt profiles, `OVERDUE` after the due date in Europe/Warsaw, list filters,
+  `PATCH`, `POST /generate`, and decision CRUD (URL validation, 409 on duplicates).
 * `tests/test_no_hardcoded_rates.py` — the policy grep above.
 
 ## CI
@@ -172,7 +247,17 @@ Coverage highlights:
   layer, not to the DB.
 * `deadline_kind` / `deadline_status` / all other enum members are the minimum agreed set
   for this skeleton; adding values requires a data migration because enums are CHECK
-  constrained.
+  constrained (see `0002`, which adds `PIT_ANNUAL`, `OPEN` and `OVERDUE`).
+* `OVERDUE` is derived, not stored: nothing marks a deadline late in the background, so
+  the value is computed per request from the Warsaw date. `PENDING`/`MISSED`/`WAIVED` are
+  legacy members kept only so old rows still load.
+* `generate_deadlines` models obligations whose *period* falls inside the requested year,
+  so the annual PIT return for 2025 is due in 2026 and appears in the calendar of 2025.
+* VAT settlement cadence (monthly vs quarterly) is an argument of the generator, not a
+  `tax_profiles` column; adding it to the profile is a one-column migration.
+* ZUS figures in the YAML are planning values for the "full" variant (including the
+  minimum health contribution); the actual health contribution depends on income and is
+  computed elsewhere. Always re-check the values against `source_url`.
 * `tax_profiles` validity ranges may overlap (no exclusion constraint, SQLite does not
   support one); services must select the row with the latest `valid_from` covering a date.
 * Embeddings are JSON text and similarity search is expected to run in Python for now;
@@ -184,9 +269,13 @@ Coverage highlights:
 ## Verification
 
 ```bash
-alembic upgrade head && pytest -q && ruff check . && mypy app && curl -s localhost:8000/health
+alembic upgrade head && python scripts/seed_tax_params.py \
+  && pytest -q && ruff check . && mypy app \
+  && curl -s localhost:8000/api/tax-params/2026 && curl -s localhost:8000/health
 ```
 
-Expected: migration applies, all tests pass, linters clean, and the health endpoint
-returns `{"status":"ok","app":"TaxWise SME API","version":"0.1.0","environment":"local"}`.
+Expected: migration applies, the seed script reports created/updated rows, all tests pass,
+linters clean, `/api/tax-params/2026` returns the stored document with `source_url` and
+`effective_from`, and `/health` returns
+`{"status":"ok","app":"TaxWise SME API","version":"0.1.0","environment":"local"}`.
 
