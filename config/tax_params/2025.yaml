@@ -81,6 +81,38 @@ zus:
       rate: 0.09
   # Sum of the rounded components above; validated against them on load.
   total_full_pln: "2094.12"
+  # Reduced variants. FULL is the `components` block above; each variant is validated to
+  # add up to its own monthly_total_pln. Preferential ("preferencyjne") uses 30% of the
+  # minimum wage as the social base and excludes the voluntary sickness contribution;
+  # "ulga na start" covers the six months in which only the health contribution is due.
+  variants:
+    PREFERENTIAL_24M:
+      components:
+        - name: emerytalna
+          base: "1399.80"
+          rate: 0.1952
+        - name: rentowa
+          base: "1399.80"
+          rate: 0.08
+        - name: wypadkowa
+          base: "1399.80"
+          rate: 0.0167
+        - name: fundusz_pracy
+          base: "1399.80"
+          rate: 0.0245
+        - name: fgsp
+          base: "1399.80"
+          rate: 0.001
+        - name: zdrowotna_min
+          base: "3499.50"
+          rate: 0.09
+      monthly_total_pln: "759.26"
+    ULGA_NA_START:
+      components:
+        - name: zdrowotna_min
+          base: "3499.50"
+          rate: 0.09
+      monthly_total_pln: "314.96"
 
 # Filing/payment calendar. The due date is always `period end + offset_days`, so the
 # calendar is data too: no due-date arithmetic in Python.

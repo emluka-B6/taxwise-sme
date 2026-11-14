@@ -1,10 +1,10 @@
 # TaxWise SME
 
 Skeleton of a finance assistant for Polish sole proprietorships (JDG, B2B): document
-intake, tax profile, deadlines, an auditable decision log and a citation-backed knowledge
-base. This repository contains the **data model, migrations, API bootstrap and CI** — the
-business logic (tax computation, importers, retrieval) is intentionally left as typed
-skeletons.
+intake, tax profile, deadlines, an auditable decision log, a citation-backed knowledge base
+and a deterministic tax/contribution calculation engine. This repository contains the
+**data model, migrations, API bootstrap, calculation formulas and CI** — importers and
+retrieval are intentionally left as typed skeletons.
 
 ## Stack
 
@@ -44,14 +44,14 @@ alembic upgrade head
 app/
   main.py            # FastAPI app factory + ASGI entrypoint
   settings.py        # pydantic-settings (DATABASE_URL, ENVIRONMENT, ...)
-  api/               # routers: health, tax_params, deadlines, decisions, documents
+  api/               # routers: health, tax_params, calc, deadlines, decisions, documents
   domain/            # pure enums, no infrastructure imports
   db/
     base.py          # DeclarativeBase + deterministic naming convention
     types.py         # JSONType, EmbeddingVector, sa_enum (cross-dialect)
     models.py        # all ORM models
     session.py       # lazy engine/session factories, FastAPI dependency
-  services/          # tax params loader, deadline calendar, ingest, classifier, storage
+  services/          # tax params, pure calc engine, deadlines, ingest, classifier, storage
   integrations/      # inFakt / Fakturownia / wFirma adapters (Protocol only)
   assistant/         # retrieval-augmented answers, citations (Protocol only)
 config/
@@ -99,7 +99,8 @@ curl -s localhost:8000/api/tax-params/2026  # source_url + effective_from + payl
 * `load(year)` → a frozen Pydantic model (cached per year, `clear_cache()` invalidates);
 * validation: scale thresholds strictly increasing (only the last bracket may be open),
   rates are positive fractions, VAT rates distinct and ascending, `zus.components`
-  (base × rate) must add up to `zus.total_full_pln` within a cent, `effective_from` must
+  (base × rate) must add up to `zus.total_full_pln` within a cent, each
+  `zus.variants.<name>` must add up to its `monthly_total_pln`, `effective_from` must
   fall in the file's year, unknown keys are rejected, `source_url` must be a specific
   document (not a site root), and each `deadlines[].rule` must match its `kind`;
 * `upsert(session, params)` → idempotent write keyed by `UNIQUE(year, version)`;
@@ -108,6 +109,49 @@ curl -s localhost:8000/api/tax-params/2026  # source_url + effective_from + payl
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/tax-params/{year}` | Stored, validated document of the highest version (404 when the year was never seeded) |
+
+## Calculation preview
+
+`app/services/calc.py` is a pure `Decimal` engine: every rate, threshold and contribution
+base is read from the `TaxYearParams` document passed in, and no function touches the
+database, clock or environment. Results are rounded to grosze with `ROUND_HALF_UP`;
+non-positive tax bases yield zero, and invalid rates/months/variants raise
+`CalcInputError`.
+
+| Function | Result |
+| --- | --- |
+| `pit_scale(income, params)` | Progressive PIT using the scale brackets and the tax-free amount |
+| `pit_linear(income, params)` | Flat-rate PIT |
+| `pit_lump_sum(revenue, rate, params)` | Ryczalt at a rate configured in `pit.lump_sum` |
+| `pit_ip_box(qualifying_income, params, eligible=...)` | IP BOX; raises `IncompatibleRegimeError` without eligibility |
+| `vat_status_check(annual_turnover, params)` | `EXEMPT` at/below the threshold, `REGISTERED` above it |
+| `vat_due(sales, costs, params)` | Output VAT minus input VAT (negative = credit) |
+| `zus_contributions(month, variant, params)` | Monthly FULL / preferential / ulga na start contributions |
+
+`POST /api/calc/preview` resolves the profile (PIT regime, ZUS variant, IP BOX eligibility)
+and the stored parameters for the year, then returns the calculated amounts plus the
+`source_url` of the document used:
+
+```bash
+curl -s -X POST localhost:8000/api/calc/preview -H 'Content-Type: application/json' -d '{
+  "year": 2026,
+  "profile_id": 1,
+  "inputs": {
+    "income": "120000.00",
+    "annual_turnover": "240000.00",
+    "sales": [{"net": "10000.00", "rate": "0.23"}],
+    "costs": [{"net": "4000.00", "rate": "0.23"}],
+    "month": 1
+  }
+}'
+```
+
+PIT for the profile's regime is required (`income` for scale/linear, `revenue` +
+`lump_sum_rate` for ryczalt, `qualifying_income` for IP BOX). VAT status is returned when
+`annual_turnover` is supplied, VAT due when `sales`/`costs` are supplied, and ZUS when
+`month` is supplied. An empty list is a valid zero; omitting a field leaves that result
+`null`. A profile that does not cover the year, or IP BOX without the eligibility flag,
+returns `409`; unusable amounts/rates return `422`.
 
 ## Deadlines and decisions
 
@@ -261,6 +305,11 @@ Coverage highlights:
   12 advances + 1 annual, due dates from the YAML offsets), idempotency, quarterly VAT,
   VAT-exempt profiles, `OVERDUE` after the due date in Europe/Warsaw, list filters,
   `PATCH`, `POST /generate`, and decision CRUD (URL validation, 409 on duplicates).
+* `tests/test_calc.py` — scale thresholds and the tax-free amount, VAT threshold
+  below/equal/above, every ZUS variant, IP BOX eligibility, grosz rounding, golden values
+  from public MF/ZUS calculators (`tests/fixtures/calc_golden_values.yaml`, with source and
+  read date), the no-rate-literals grep, and `POST /api/calc/preview` (all regimes,
+  `source_url`, 404/409/422 paths).
 * `tests/test_no_hardcoded_rates.py` — the policy grep above.
 
 ## CI
@@ -299,9 +348,18 @@ Coverage highlights:
   so the annual PIT return for 2025 is due in 2026 and appears in the calendar of 2025.
 * VAT settlement cadence (monthly vs quarterly) is an argument of the generator, not a
   `tax_profiles` column; adding it to the profile is a one-column migration.
-* ZUS figures in the YAML are planning values for the "full" variant (including the
-  minimum health contribution); the actual health contribution depends on income and is
+* ZUS figures in the YAML are planning values. `zus.components` is the "full" variant
+  (including the minimum health contribution); `zus.variants` carries the preferential and
+  "ulga na start" component sets. The actual health contribution depends on income and is
   computed elsewhere. Always re-check the values against `source_url`.
+* The calculation engine is annual: `POST /api/calc/preview` requires the profile to be in
+  force at the end of the requested year and takes the PIT base / turnover as inputs. It
+  does not apply social/health contributions to the PIT base, does not pro-rate a partial
+  year, and returns VAT as a signed balance (negative = credit) rather than carrying it
+  forward. ZUS amounts are constant within a variant, so the `month` argument identifies the
+  settlement period; eligibility windows are represented by the variant chosen for that
+  month. IP BOX eligibility is the profile's `ip_box_rate` being set - the rate itself still
+  comes from the yearly parameter document.
 * `tax_profiles` validity ranges may overlap (no exclusion constraint, SQLite does not
   support one); services must select the row with the latest `valid_from` covering a date.
 * Embeddings are JSON text and similarity search is expected to run in Python for now;

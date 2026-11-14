@@ -72,6 +72,36 @@ zus:
       base: "3604.50"
       rate: 0.09
   total_full_pln: "2198.35"
+  # Reduced variants; see 2025.yaml for the rules. Preferential social base is 30% of the
+  # projected 2026 minimum wage (4806.00), health contribution is 9% of 75% of it.
+  variants:
+    PREFERENTIAL_24M:
+      components:
+        - name: emerytalna
+          base: "1441.80"
+          rate: 0.1952
+        - name: rentowa
+          base: "1441.80"
+          rate: 0.08
+        - name: wypadkowa
+          base: "1441.80"
+          rate: 0.0167
+        - name: fundusz_pracy
+          base: "1441.80"
+          rate: 0.0245
+        - name: fgsp
+          base: "1441.80"
+          rate: 0.001
+        - name: zdrowotna_min
+          base: "3604.50"
+          rate: 0.09
+      monthly_total_pln: "782.03"
+    ULGA_NA_START:
+      components:
+        - name: zdrowotna_min
+          base: "3604.50"
+          rate: 0.09
+      monthly_total_pln: "324.41"
 
 deadlines:
   - kind: VAT_DECLARATION

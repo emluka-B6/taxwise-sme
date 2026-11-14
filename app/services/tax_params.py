@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import TaxYearParams as TaxYearParamsRow
-from app.domain.enums import DeadlineKind, DeadlineRule
+from app.domain.enums import DeadlineKind, DeadlineRule, ZusVariant
 
 __all__ = [
     "CONFIG_DIR",
@@ -46,6 +46,7 @@ __all__ = [
     "Vat",
     "Zus",
     "ZusComponent",
+    "ZusVariantSpec",
     "clear_cache",
     "config_path",
     "from_row",
@@ -186,26 +187,62 @@ class ZusComponent(_Model):
     rate: _Rate
 
 
-class Zus(_Model):
-    """Contribution components and the monthly total they must add up to."""
+def _zus_components_total(components: Sequence[ZusComponent]) -> Decimal:
+    """Sum of ``base x rate`` rounded component-by-component to grosze."""
+    return sum(
+        (
+            (component.base * component.rate).quantize(_CENT, ROUND_HALF_UP)
+            for component in components
+        ),
+        Decimal("0"),
+    )
+
+
+class ZusVariantSpec(_Model):
+    """Reduced ZUS variant: its components and the monthly total they add up to.
+
+    ``FULL`` is intentionally *not* stored here; it is the top-level ``components`` block
+    of :class:`Zus`, so the historical document shape keeps working unchanged.
+    """
 
     components: Annotated[list[ZusComponent], Field(min_length=1)]
-    total_full_pln: _PositiveMoney
+    monthly_total_pln: _PositiveMoney
 
     @model_validator(mode="after")
     def _total_matches_components(self) -> Self:
-        computed = sum(
-            (
-                (component.base * component.rate).quantize(_CENT, ROUND_HALF_UP)
-                for component in self.components
-            ),
-            Decimal("0"),
-        )
+        computed = _zus_components_total(self.components)
+        if abs(computed - self.monthly_total_pln) > ZUS_TOTAL_TOLERANCE_PLN:
+            raise ValueError(
+                "zus variant monthly_total_pln does not match the components: "
+                f"components sum to {computed}, total says {self.monthly_total_pln}"
+            )
+        return self
+
+
+class Zus(_Model):
+    """Contribution components for the full variant, plus reduced variants by name."""
+
+    components: Annotated[list[ZusComponent], Field(min_length=1)]
+    total_full_pln: _PositiveMoney
+    variants: Annotated[dict[ZusVariant, ZusVariantSpec], Field(default_factory=dict)] = Field(
+        default_factory=dict,
+        description="Reduced variants (preferential, ulga na start); FULL is the block above.",
+    )
+
+    @model_validator(mode="after")
+    def _total_matches_components(self) -> Self:
+        computed = _zus_components_total(self.components)
         if abs(computed - self.total_full_pln) > ZUS_TOTAL_TOLERANCE_PLN:
             raise ValueError(
                 "zus.total_full_pln does not match the components: "
                 f"components sum to {computed}, total says {self.total_full_pln}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _full_is_not_a_reduced_variant(self) -> Self:
+        if ZusVariant.FULL in self.variants:
+            raise ValueError("zus.variants must not redefine FULL; use zus.components instead")
         return self
 
 

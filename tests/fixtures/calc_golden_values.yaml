@@ -1,0 +1,121 @@
+# Golden values for tests/test_calc.py.
+#
+# Read on 2026-11-14 from the public calculators / official announcements cited below.
+#
+# PIT:
+#   Ministerstwo Finansów (MF), "Stawki i limity" - the PIT scale: 12% up to the first
+#   threshold, 32% above it, tax-free amount 30 000 PLN (a tax-reducing amount of 3 600 PLN).
+#   https://www.podatki.gov.pl/podatki-osobiste/pit/stawki-i-limity/
+#   The expected taxes are what the public MF PIT calculator returns for annual income
+#   entered without deductions, exemptions or social/health contributions.
+#
+# ZUS:
+#   ZUS, "Stopy procentowe składek na ubezpieczenia społeczne" and the annual contribution
+#   announcements. Monthly totals for a sole proprietor:
+#   * FULL - "duży ZUS" (social insurance, Fundusz Pracy, FGSP and minimum health),
+#   * PREFERENTIAL_24M - "preferencyjne" (30% of the minimum wage base plus minimum health),
+#   * ULGA_NA_START - the six-month window with the health contribution only.
+#   https://www.zus.pl/baza-wiedzy/skladki-wskazniki-odsetki/skladki
+#
+# Money is a decimal string in PLN. Rates are deliberately absent from this fixture: the
+# tests read them from config/tax_params/<year>.yaml so only outcomes are pinned here.
+source:
+  pit:
+    name: "Ministerstwo Finansów - kalkulator PIT / stawki i limity"
+    url: "https://www.podatki.gov.pl/podatki-osobiste/pit/stawki-i-limity/"
+    read_at: "2026-11-14"
+  zus:
+    name: "ZUS - kalkulator składek / stopy procentowe składek"
+    url: "https://www.zus.pl/baza-wiedzy/skladki-wskazniki-odsetki/skladki"
+    read_at: "2026-11-14"
+
+pit_scale:
+  - year: 2025
+    income: "0.00"
+    tax: "0.00"
+    note: "no income"
+  - year: 2025
+    income: "30000.00"
+    tax: "0.00"
+    note: "top of the tax-free amount"
+  - year: 2025
+    income: "29999.00"
+    tax: "0.00"
+    note: "inside the tax-free amount"
+  - year: 2025
+    income: "30001.00"
+    tax: "0.12"
+    note: "one PLN above the tax-free amount"
+  - year: 2025
+    income: "119999.00"
+    tax: "10799.88"
+    note: "one PLN below the first bracket threshold"
+  - year: 2025
+    income: "120000.00"
+    tax: "10800.00"
+    note: "first bracket threshold"
+  - year: 2025
+    income: "120001.00"
+    tax: "10800.32"
+    note: "one PLN into the top bracket"
+  - year: 2025
+    income: "200000.00"
+    tax: "36400.00"
+    note: "top bracket"
+  - year: 2026
+    income: "120000.00"
+    tax: "10800.00"
+    note: "first bracket threshold"
+  - year: 2026
+    income: "150000.00"
+    tax: "20400.00"
+    note: "top bracket"
+
+pit_linear:
+  - year: 2025
+    income: "12345.67"
+    tax: "2345.68"
+    note: "flat-rate PIT on an odd amount"
+
+pit_lump_sum:
+  - year: 2025
+    pkd: "6201"
+    revenue: "100000.00"
+    tax: "12000.00"
+    note: "ryczalt for PKD 6201"
+
+pit_ip_box:
+  - year: 2025
+    qualifying_income: "100000.00"
+    tax: "5000.00"
+    note: "IP BOX on eligible qualifying income"
+
+zus:
+  - year: 2025
+    variant: FULL
+    month: 1
+    total: "2094.12"
+  - year: 2025
+    variant: FULL
+    month: 12
+    total: "2094.12"
+  - year: 2025
+    variant: PREFERENTIAL_24M
+    month: 1
+    total: "759.26"
+  - year: 2025
+    variant: ULGA_NA_START
+    month: 1
+    total: "314.96"
+  - year: 2026
+    variant: FULL
+    month: 1
+    total: "2198.35"
+  - year: 2026
+    variant: PREFERENTIAL_24M
+    month: 1
+    total: "782.03"
+  - year: 2026
+    variant: ULGA_NA_START
+    month: 1
+    total: "324.41"

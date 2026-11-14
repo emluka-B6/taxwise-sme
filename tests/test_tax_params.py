@@ -122,6 +122,36 @@ def test_inconsistent_zus_total_is_rejected(tmp_path: Path) -> None:
     assert "total_full_pln" in str(excinfo.value)
 
 
+def test_inconsistent_reduced_zus_variant_total_is_rejected(tmp_path: Path) -> None:
+    document = _document(2025)
+    zus = document["zus"]
+    assert isinstance(zus, dict)
+    variants = zus["variants"]
+    assert isinstance(variants, dict)
+    preferential = variants["PREFERENTIAL_24M"]
+    assert isinstance(preferential, dict)
+    preferential["monthly_total_pln"] = 1000
+
+    with pytest.raises(tax_params.TaxParamsConfigError) as excinfo:
+        tax_params.load_file(_write(tmp_path, document))
+
+    assert "monthly_total_pln" in str(excinfo.value)
+
+
+def test_full_zus_variant_cannot_be_redefined_in_variants(tmp_path: Path) -> None:
+    document = _document(2025)
+    zus = document["zus"]
+    assert isinstance(zus, dict)
+    variants = zus["variants"]
+    assert isinstance(variants, dict)
+    variants["FULL"] = variants["PREFERENTIAL_24M"]
+
+    with pytest.raises(tax_params.TaxParamsConfigError) as excinfo:
+        tax_params.load_file(_write(tmp_path, document))
+
+    assert "FULL" in str(excinfo.value)
+
+
 def test_non_increasing_thresholds_are_rejected(tmp_path: Path) -> None:
     document = _document(2025)
     pit = document["pit"]
