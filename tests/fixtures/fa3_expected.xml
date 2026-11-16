@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Faktura xmlns="http://crd.gov.pl/wzor/2025/06/25/13775/">
+  <Naglowek>
+    <KodFormularza kodSystemowy="FA (3)" wersjaSchemy="1-0E">FA</KodFormularza>
+    <WariantFormularza>3</WariantFormularza>
+    <DataWytworzeniaFa>2026-02-15T09:30:00Z</DataWytworzeniaFa>
+    <SystemInfo>TaxWise SME - plik wygenerowany lokalnie, NIE został przesłany do KSeF</SystemInfo>
+  </Naglowek>
+  <Podmiot1>
+    <DaneIdentyfikacyjne>
+      <NIP>5260250274</NIP>
+      <Nazwa>TaxWise Jan Kowalski</Nazwa>
+    </DaneIdentyfikacyjne>
+    <Adres>
+      <KodKraju>PL</KodKraju>
+      <AdresL1>ul. Kwiatowa 1</AdresL1>
+      <AdresL2>00-001 Warszawa</AdresL2>
+    </Adres>
+  </Podmiot1>
+  <Podmiot2>
+    <DaneIdentyfikacyjne>
+      <NIP>9999999999</NIP>
+      <Nazwa>ABC AGD sp. z o.o.</Nazwa>
+    </DaneIdentyfikacyjne>
+    <Adres>
+      <KodKraju>PL</KodKraju>
+      <AdresL1>ul. Polna 1</AdresL1>
+      <AdresL2>00-001 Warszawa</AdresL2>
+    </Adres>
+    <JST>2</JST>
+    <GV>2</GV>
+  </Podmiot2>
+  <Fa>
+    <KodWaluty>PLN</KodWaluty>
+    <P_1>2026-02-15</P_1>
+    <P_1M>Warszawa</P_1M>
+    <P_2>FV/2026/02/1</P_2>
+    <P_6>2026-02-10</P_6>
+    <P_13_1>2000.00</P_13_1>
+    <P_14_1>460.00</P_14_1>
+    <P_13_2>500.00</P_13_2>
+    <P_14_2>40.00</P_14_2>
+    <P_13_7>250.00</P_13_7>
+    <P_15>3250.00</P_15>
+    <Adnotacje>
+      <P_16>2</P_16>
+      <P_17>2</P_17>
+      <P_18>2</P_18>
+      <P_18A>2</P_18A>
+      <Zwolnienie>
+        <P_19>1</P_19>
+        <P_19A>art. 43 ust. 1 pkt 3 ustawy o VAT</P_19A>
+      </Zwolnienie>
+      <NoweSrodkiTransportu>
+        <P_22N>1</P_22N>
+      </NoweSrodkiTransportu>
+      <P_23>2</P_23>
+      <PMarzy>
+        <P_PMarzyN>1</P_PMarzyN>
+      </PMarzy>
+    </Adnotacje>
+    <RodzajFaktury>VAT</RodzajFaktury>
+    <FaWiersz>
+      <NrWierszaFa>1</NrWierszaFa>
+      <P_7>Usluga doradcza</P_7>
+      <P_8A>szt.</P_8A>
+      <P_8B>2</P_8B>
+      <P_9A>1000.00</P_9A>
+      <P_11>2000.00</P_11>
+      <P_12>23</P_12>
+    </FaWiersz>
+    <FaWiersz>
+      <NrWierszaFa>2</NrWierszaFa>
+      <P_7>Szkolenie</P_7>
+      <P_8A>usl.</P_8A>
+      <P_8B>1</P_8B>
+      <P_9A>500.00</P_9A>
+      <P_11>500.00</P_11>
+      <P_12>8</P_12>
+    </FaWiersz>
+    <FaWiersz>
+      <NrWierszaFa>3</NrWierszaFa>
+      <P_7>Swiadczenie zwolnione</P_7>
+      <P_8A>usl.</P_8A>
+      <P_8B>1</P_8B>
+      <P_9A>250.00</P_9A>
+      <P_11>250.00</P_11>
+      <P_12>zw</P_12>
+    </FaWiersz>
+  </Fa>
+</Faktura>

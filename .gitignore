@@ -18,6 +18,7 @@ htmlcov/
 *.sqlite
 *.sqlite3
 documents/
+resources/
 .env
 .env.*
 !.env.example

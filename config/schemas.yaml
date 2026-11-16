@@ -1,0 +1,53 @@
+# XSD schema registry.
+#
+# Each entry names an *official* schema, the exact URL it is published under, the SHA-256
+# of the file this repository was verified against and where the download lands. The
+# checksums and the FA(3) metadata below were taken from the Ministry of Finance
+# publications (crd.gov.pl); a changed file therefore fails `scripts/fetch_schemas.py`
+# instead of silently changing the format we validate against.
+#
+#   python scripts/fetch_schemas.py            # download + verify every configured target
+#   python scripts/fetch_schemas.py --check    # verify already-downloaded files only
+#
+# Nothing here is needed to *build* an invoice: the XSD is only used when validation is
+# requested and its absence is reported as SKIPPED, never as an error.
+
+ksef_fa3:
+  # Value sent in `X-KSeF-Schema-Version` and reported in the logs/README.
+  version: "FA(3)"
+  # Format metadata of the FA(3) logical structure; the builder reads it from here so the
+  # namespace and the KodFormularza attributes are never literals in Python code.
+  namespace: "http://crd.gov.pl/wzor/2025/06/25/13775/"
+  kod_formularza: "FA"
+  kod_systemowy: "FA (3)"
+  wariant_formularza: 3
+  wersja_schemy: "1-0E"
+  url: "https://crd.gov.pl/wzor/2025/06/25/13775/schemat.xsd"
+  sha256: "b646b6b525f51adf1bb2545f111fc8ca6e7aa6dd2f98948f1667d3695c06d958"
+  path: "resources/ksef/FA3.xsd"
+  # The FA(3) XSD imports and includes the shared eD definition files. They are fetched
+  # next to FA3.xsd and resolved by file name, which keeps validation offline-capable.
+  imports:
+    - url: "http://crd.gov.pl/xml/schematy/dziedzinowe/mf/2022/01/05/eD/DefinicjeTypy/StrukturyDanych_v10-0E.xsd"
+      sha256: "1137ce6e3c11c2b9ef3f05e4e72d6dcd6b4fa94908ea558f2ba15de0259bb2aa"
+      filename: "StrukturyDanych_v10-0E.xsd"
+    - url: "http://crd.gov.pl/xml/schematy/dziedzinowe/mf/2022/01/05/eD/DefinicjeTypy/ElementarneTypyDanych_v10-0E.xsd"
+      sha256: "8a531cb181d3e298d11b28766655ae91fee2d7851440095932ffc82137ed2be1"
+      filename: "ElementarneTypyDanych_v10-0E.xsd"
+    - url: "http://crd.gov.pl/xml/schematy/dziedzinowe/mf/2022/01/05/eD/DefinicjeTypy/KodyKrajow_v10-0E.xsd"
+      sha256: "1d41a1b3184188f2d20a51d3afde26204dda182ec5dacf018204dcc9870dc644"
+      filename: "KodyKrajow_v10-0E.xsd"
+
+jpk_pit:
+  # No verified official download is recorded in this repository, so this optional target
+  # is reported as SKIPPED by `scripts/fetch_schemas.py` until `url`/`sha256` are filled
+  # in. The path is reserved so an operator can drop a verified copy in place.
+  version: null
+  url: null
+  sha256: null
+  path: "resources/jpk/JPK_PIT.xsd"
+  optional: true
+  notes: >-
+    JPK_PIT is outside the KSeF export scope. Add the official MF url and the SHA-256 of
+    the published XSD here when a verified source is available; until then the target is
+    skipped (no download, no error).

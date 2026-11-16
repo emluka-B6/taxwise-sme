@@ -12,6 +12,7 @@ license = { text = "Proprietary" }
 dependencies = [
     "alembic>=1.13",
     "fastapi>=0.115",
+    "lxml>=5.2",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "python-multipart>=0.0.20",
@@ -71,4 +72,9 @@ pretty = true
 # override keeps `mypy app` clean on machines where only the runtime dependency is present.
 [[tool.mypy.overrides]]
 module = ["yaml"]
+ignore_missing_imports = true
+
+# lxml ships compiled extension modules without type information.
+[[tool.mypy.overrides]]
+module = ["lxml", "lxml.etree"]
 ignore_missing_imports = true

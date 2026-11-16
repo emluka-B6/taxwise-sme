@@ -10,6 +10,7 @@ from app.api import (
     decisions_router,
     documents_router,
     health_router,
+    ksef_export_router,
     tax_params_router,
 )
 from app.settings import Settings, get_settings
@@ -31,6 +32,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(deadlines_router)
     application.include_router(decisions_router)
     application.include_router(documents_router)
+    application.include_router(ksef_export_router)
     return application
 
 

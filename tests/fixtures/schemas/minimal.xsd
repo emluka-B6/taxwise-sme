@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Minimal XSD fixture used by tests/test_schema_validation.py.
+
+  It is deliberately *not* the official FA(3) schema: it pins only the contract that the
+  export endpoint relies on, namely that the document is a <Faktura> in the FA(3) target
+  namespace. The content is skipped, so the fixture stays small while still rejecting a
+  document in a different namespace or with a different root element - which is what the
+  XSD-validation code path has to report.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns:tns="http://crd.gov.pl/wzor/2025/06/25/13775/"
+           targetNamespace="http://crd.gov.pl/wzor/2025/06/25/13775/"
+           elementFormDefault="qualified">
+  <xs:element name="Faktura">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:any namespace="##any" processContents="skip" minOccurs="0" maxOccurs="unbounded"/>
+      </xs:sequence>
+      <xs:anyAttribute processContents="lax"/>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

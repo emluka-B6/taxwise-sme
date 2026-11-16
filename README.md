@@ -15,6 +15,7 @@ retrieval are intentionally left as typed skeletons.
 | ORM | SQLAlchemy 2.0 typed (`Mapped` / `mapped_column`) |
 | Migrations | Alembic (autogenerate + manual review) |
 | Validation / settings | Pydantic v2, pydantic-settings |
+| XML / XSD | `lxml` (FA(3) export and optional XSD validation) |
 | DB | SQLite locally, PostgreSQL in production (`DATABASE_URL`) |
 | Quality | pytest, ruff, mypy (strict) |
 
@@ -53,11 +54,15 @@ app/
     session.py       # lazy engine/session factories, FastAPI dependency
   services/          # tax params, pure calc engine, deadlines, ingest, classifier, storage
   integrations/      # inFakt / Fakturownia / wFirma adapters (Protocol only)
+    ksef/            # FA(3) invoice builder + structural validation (no KSeF transmission)
+    schemas.py       # schema registry (config/schemas.yaml) + optional XSD validation
   assistant/         # retrieval-augmented answers, citations (Protocol only)
 config/
   tax_params/        # 2025.yaml, 2026.yaml - legal parameters as data
+  schemas.yaml       # XSD urls/checksums + FA(3) format metadata
 scripts/
   seed_tax_params.py # idempotent loader: YAML -> tax_year_params
+  fetch_schemas.py   # download + checksum-verify the XSDs (resources/, gitignored)
 alembic/
   env.py             # URL from DATABASE_URL, batch mode on SQLite
   versions/0001_initial.py
@@ -223,6 +228,94 @@ file names and storage paths are not logged.
 A raw upload has no parsed amount/date yet, so `issue_date`/`period` default to the
 Warsaw date and `amount_gross` is stored as `0.00`; extraction is a later pipeline step.
 
+## KSeF FA(3) export (no transmission)
+
+`GET /api/documents/{id}/ksef-xml` renders a `VAT_INVOICE_SALES` document as an XML file in
+the KSeF logical structure **FA(3)**. **The file is not sent to KSeF.** The tool never calls
+the KSeF API, holds no KSeF credentials and does not sign anything: the response is meant
+for review, signing and upload by an authorised tool. The guarantee is visible in the
+response (`X-KSeF-Transmission: not-sent`) and inside the document itself
+(`Naglowek/SystemInfo` = "plik wygenerowany lokalnie, NIE zostal przeslany do KSeF").
+
+```bash
+curl -s "localhost:8000/api/documents/1/ksef-xml?validate=true" \
+  -H 'Content-Type: application/json' -o faktura.xml -D - -d '{
+    "number": "FV/2026/02/1",
+    "place": "Warszawa",
+    "sale_date": "2026-02-10",
+    "exemption_basis": "art. 43 ust. 1 pkt 3 ustawy o VAT",
+    "seller": {"nip": "5260250274", "name": "TaxWise Jan Kowalski",
+               "address_line_1": "ul. Kwiatowa 1", "address_line_2": "00-001 Warszawa"},
+    "buyer":  {"nip": "9999999999", "name": "ABC AGD sp. z o.o.",
+               "address_line_1": "ul. Polna 1", "address_line_2": "00-001 Warszawa"},
+    "lines": [
+      {"description": "Usluga doradcza", "quantity": "2", "unit": "szt.",
+       "unit_net_price": "1000.00", "vat_rate": "23"},
+      {"description": "Szkolenie", "quantity": "1", "unit": "usl.",
+       "unit_net_price": "500.00", "vat_rate": "8"},
+      {"description": "Swiadczenie zwolnione", "quantity": "1", "unit": "usl.",
+       "unit_net_price": "250.00", "vat_rate": "zw"}
+    ]
+  }'
+```
+
+The stored row supplies the type, the issue date (`P_1`), the currency and the net/VAT/gross
+amounts the XML must add up to. The body supplies what the skeleton does not store yet
+(number, parties, lines, exemption basis). The request is read-only, hence `GET` with a body.
+
+| Header | Meaning |
+| --- | --- |
+| `X-KSeF-Schema-Version` | FA(3) - taken from `config/schemas.yaml`, not from code |
+| `X-Schema-Validation` | `ok` / `failed` / `skipped` (schema not downloaded - not an error) |
+| `X-KSeF-Transmission` | `not-sent` - nothing left this process |
+
+Validation layers:
+
+1. **Builder checks** (`app/integrations/ksef/fa3_builder.py`) - required fields, NIP
+   checksums, `JST`/`GV` flags, supported rates (`23`, `8`, `5`, `0`, `zw`) and the
+   net/VAT/gross totals against the stored document. `Decimal` everywhere; net values are
+   rounded to grosze per line, VAT per rate group (`P_14_x` taxes the group's net). Any
+   difference is a `422` with the full violation list, never a silent correction.
+2. **Structural validation** (`app/integrations/ksef/fa3_validate.py`) - required elements,
+   types (dates, two-decimal amounts, integer row numbers, rate codes), `P_13_x`/`P_14_x`
+   against the lines of that rate, and `P_15` against the sum of the groups.
+3. **XSD validation** (optional, `?validate=true`) - `app/integrations/schemas.py` compiles
+   the schema with `lxml` and returns `Violation(path="line N", message=...)`. No schema on
+   disk -> `X-Schema-Validation: skipped` and a normal `200`; the schema also never travels
+   over the network at request time.
+
+The FA(3) metadata (namespace `http://crd.gov.pl/wzor/2025/06/25/13775/`,
+`KodFormularza kodSystemowy="FA (3)" wersjaSchemy="1-0E"`, `WariantFormularza=3` and the
+version label) lives in `config/schemas.yaml`; the builder reads it through
+`schemas.fa3_format()`, so a format bump is a config change.
+
+### Fetching the XSDs
+
+```bash
+python scripts/fetch_schemas.py             # download + verify every configured target
+python scripts/fetch_schemas.py --check     # verify the local copies only
+python scripts/fetch_schemas.py --only ksef_fa3
+```
+
+`config/schemas.yaml` records, per schema, the official `url`, the expected `sha256`, the
+`version` and the target `path` (`resources/ksef/FA3.xsd`, `resources/jpk/JPK_PIT.xsd`).
+Downloads are written only after the digest matches; a mismatch aborts with exit code `2`
+and leaves the previous file untouched. `FA3.xsd` imports the shared eD definition files
+(pinned with their own checksums), which are fetched next to it and resolved offline.
+`resources/` is gitignored. `jpk_pit` is an optional entry without a verified official URL,
+so the script reports it as **skipped** instead of failing.
+
+### Known limitations
+
+* One VAT rate per line; rates outside `23/8/5/0/zw` (e.g. `oo`, `np`, WDT/export) are
+  rejected rather than guessed.
+* Only `RodzajFaktury=VAT` invoices; corrections (`KOR`), advances (`ZAL`) and margin
+  procedures are not generated.
+* Buyer identification is by NIP only (no `BrakID`/`UE` NIP variants), and the invoice
+  carries no `Platnosc`/`WarunkiTransakcji` block.
+* Totals are compared with the `documents` row, so a row without `amount_net`/`vat_amount`
+  cannot be exported.
+
 
 ## Data model
 
@@ -311,6 +404,15 @@ Coverage highlights:
   read date), the no-rate-literals grep, and `POST /api/calc/preview` (all regimes,
   `source_url`, 404/409/422 paths).
 * `tests/test_no_hardcoded_rates.py` — the policy grep above.
+* `tests/test_ksef_fa3.py` — the golden FA(3) file (`tests/fixtures/fa3_expected.xml`),
+  config-driven namespace/`KodFormularza`, per-rate totals, totals/field mismatches as
+  `422` violations, structural validation (broken `P_15`, rate groups, namespace), and the
+  export endpoint: `application/xml`, `X-KSeF-Schema-Version: FA(3)`,
+  `X-Schema-Validation: ok|failed|skipped`, `X-KSeF-Transmission: not-sent`, 404/409/422.
+* `tests/test_schema_validation.py` — the schema registry, XSD validation against
+  `tests/fixtures/schemas/minimal.xsd`, SKIPPED without a schema, malformed XML as a
+  violation, an unusable schema as an error, and `scripts/fetch_schemas.py` (checksum
+  verification, atomic write, abort on mismatch, `--check`, optional targets).
 
 ## CI
 
@@ -367,17 +469,29 @@ Coverage highlights:
 * `/health` is a liveness probe without a database check by design; a separate readiness
   probe should query the DB when deployment needs it.
 * No authentication/authorisation layer is included in the skeleton.
+* The FA(3) export **never transmits anything to KSeF**: there is no KSeF client, session or
+  token in the codebase. Generated XML is unsigned and must be reviewed and uploaded by an
+  authorised tool.
+* `GET /api/documents/{id}/ksef-xml` takes a JSON body because the `documents` row stores
+  only aggregates; once invoices are parsed into line items the body can become optional.
+  `?validate=true` reads a local XSD and never fetches one.
 
 ## Verification
 
 ```bash
 alembic upgrade head && python scripts/seed_tax_params.py \
+  && python scripts/fetch_schemas.py \
   && pytest -q && ruff check . && mypy app \
   && curl -s localhost:8000/api/tax-params/2026 && curl -s localhost:8000/health
 ```
 
-Expected: migration applies, the seed script reports created/updated rows, all tests pass,
+Expected: migration applies, the seed script reports created/updated rows, the schema
+script fetches and verifies the FA(3) XSDs (`resources/`, optional), all tests pass,
 linters clean, `/api/tax-params/2026` returns the stored document with `source_url` and
 `effective_from`, and `/health` returns
 `{"status":"ok","app":"TaxWise SME API","version":"0.1.0","environment":"local"}`.
+
+The KSeF export is covered by `pytest -q tests/test_ksef_fa3.py tests/test_schema_validation.py`;
+the second file needs `scripts/fetch_schemas.py` for the end-to-end check against the
+official schema and skips that one test otherwise.
 
