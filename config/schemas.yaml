@@ -48,6 +48,9 @@ jpk_pit:
   path: "resources/jpk/JPK_PIT.xsd"
   optional: true
   notes: >-
-    JPK_PIT is outside the KSeF export scope. Add the official MF url and the SHA-256 of
-    the published XSD here when a verified source is available; until then the target is
-    skipped (no download, no error).
+    JPK_PIT is outside the KSeF export scope. The existence of a separate JPK_PIT XSD
+    published by the Ministry of Finance requires confirmation at the source, so no url or
+    checksum is recorded here. Add the verified url and SHA-256 when that confirmation is
+    available; until then `scripts/fetch_schemas.py` reports this optional target as
+    skipped (no download, no error) and the export endpoint marks XSD validation as
+    `skipped`.

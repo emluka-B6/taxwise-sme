@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<JPK_PIT xmlns="urn:taxwise:jpk-pit:1-0">
+  <Naglowek>
+    <KodFormularza kodSystemowy="JPK_PIT" wersjaSchemy="1-0">JPK_PIT</KodFormularza>
+    <WariantFormularza>1</WariantFormularza>
+    <DataOd>2026-02-01</DataOd>
+    <DataDo>2026-02-28</DataDo>
+    <CelZlozenia>1</CelZlozenia>
+    <DataWytworzenia>2026-03-10T08:00:00Z</DataWytworzenia>
+    <SystemInfo>TaxWise SME - plik wygenerowany lokalnie, NIE został przesłany do systemu MF</SystemInfo>
+  </Naglowek>
+  <Pozycje>
+    <Pozycja>
+      <Typ>PRZYCHOD</Typ>
+      <Data>2026-02-10</Data>
+      <KwotaNetto>1000.00</KwotaNetto>
+      <KwotaVat>230.00</KwotaVat>
+      <KwotaBrutto>1230.00</KwotaBrutto>
+      <NipKontrahenta>9999999999</NipKontrahenta>
+    </Pozycja>
+    <Pozycja>
+      <Typ>KOSZT</Typ>
+      <Data>2026-02-12</Data>
+      <KwotaNetto>400.00</KwotaNetto>
+      <KwotaVat>92.00</KwotaVat>
+      <KwotaBrutto>492.00</KwotaBrutto>
+      <NipKontrahenta>5260250274</NipKontrahenta>
+    </Pozycja>
+  </Pozycje>
+  <Podsumowanie>
+    <LiczbaPrzychodow>1</LiczbaPrzychodow>
+    <LiczbaKosztow>1</LiczbaKosztow>
+    <SumaPrzychodowNetto>1000.00</SumaPrzychodowNetto>
+    <SumaPrzychodowVat>230.00</SumaPrzychodowVat>
+    <SumaPrzychodowBrutto>1230.00</SumaPrzychodowBrutto>
+    <SumaKosztowNetto>400.00</SumaKosztowNetto>
+    <SumaKosztowVat>92.00</SumaKosztowVat>
+    <SumaKosztowBrutto>492.00</SumaKosztowBrutto>
+    <SaldoBrutto>738.00</SaldoBrutto>
+  </Podsumowanie>
+</JPK_PIT>

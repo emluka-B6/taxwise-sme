@@ -234,7 +234,7 @@ class LineItem:
     vat_rate: VatRate | str | Decimal
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "quantity", _decim63al(self.quantity, "line quantity"))
+        object.__setattr__(self, "quantity", _decimal(self.quantity, "line quantity"))
         object.__setattr__(self, "unit_net_price", _decimal(self.unit_net_price, "unit net price"))
         object.__setattr__(self, "vat_rate", _coerce_rate(self.vat_rate))
 

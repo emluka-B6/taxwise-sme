@@ -45,7 +45,8 @@ alembic upgrade head
 app/
   main.py            # FastAPI app factory + ASGI entrypoint
   settings.py        # pydantic-settings (DATABASE_URL, ENVIRONMENT, ...)
-  api/               # routers: health, tax_params, calc, deadlines, decisions, documents
+  api/               # routers: health, tax_params, calc, deadlines, decisions, documents,
+                     # ksef export, period exports (JPK_PIT / tax pack)
   domain/            # pure enums, no infrastructure imports
   db/
     base.py          # DeclarativeBase + deterministic naming convention
@@ -55,6 +56,7 @@ app/
   services/          # tax params, pure calc engine, deadlines, ingest, classifier, storage
   integrations/      # inFakt / Fakturownia / wFirma adapters (Protocol only)
     ksef/            # FA(3) invoice builder + structural validation (no KSeF transmission)
+    jpk/             # JPK_PIT builder + structural validation (no MF submission)
     schemas.py       # schema registry (config/schemas.yaml) + optional XSD validation
   assistant/         # retrieval-augmented answers, citations (Protocol only)
 config/
@@ -303,7 +305,9 @@ Downloads are written only after the digest matches; a mismatch aborts with exit
 and leaves the previous file untouched. `FA3.xsd` imports the shared eD definition files
 (pinned with their own checksums), which are fetched next to it and resolved offline.
 `resources/` is gitignored. `jpk_pit` is an optional entry without a verified official URL,
-so the script reports it as **skipped** instead of failing.
+so the script reports it as **skipped** instead of failing. The existence of a separate
+JPK_PIT XSD published by the MF requires confirmation at the source; until that is
+confirmed the export marks XSD validation as `skipped` (see the JPK_PIT section below).
 
 ### Known limitations
 
@@ -315,6 +319,68 @@ so the script reports it as **skipped** instead of failing.
   carries no `Platnosc`/`WarunkiTransakcji` block.
 * Totals are compared with the `documents` row, so a row without `amount_net`/`vat_amount`
   cannot be exported.
+
+
+## JPK_PIT export and tax pack (no submission to MF)
+
+`GET /api/exports/jpk-pit?year=&month=` maps the `VAT_INVOICE_SALES` documents whose
+`period` is that month to `PRZYCHOD` rows and the `VAT_INVOICE_COST` documents to `KOSZT`
+rows. Each row carries `typ`, `data` (the document `issue_date`), `kwota_netto`,
+`kwota_vat`, `kwota_brutto` and `nip_kontrahenta`; no name or address is copied. Amounts are
+`Decimal` end to end, written with two fraction digits, and rows are ordered by issue date
+and id, so the same rows always render the same bytes.
+
+```bash
+curl -s "localhost:8000/api/exports/jpk-pit?year=2026&month=2" -o jpk_pit_2026_02.xml -D -
+curl -s "localhost:8000/api/exports/tax-pack?year=2026" -o tax_pack_2026.zip -D -
+```
+
+| Endpoint | Response | Marking |
+| --- | --- | --- |
+| `GET /api/exports/jpk-pit?year=&month=` | `application/xml`, `jpk_pit_<year>_<month>.xml` | `X-JPK-PIT-Transmission: not-sent`, `X-Schema-Validation: ok/failed/skipped`, `X-JPK-PIT-Schema: unconfirmed` |
+| `GET /api/exports/tax-pack?year=` | `application/zip`, `tax_pack_<year>.zip` | same marking; the archive holds `jpk_pit_<year>.xml`, `statement_<year>.csv` and `manifest.json` |
+
+`manifest.json` lists every other file with its SHA-256 and byte size, plus
+`jpk_pit_schema_status` and `submitted_to_mf: false`. ZIP entries use a fixed timestamp;
+the manifest additionally records the generation time. File names contain only the period -
+never a NIP, a company name or a document id.
+
+Before a file is returned it passes two checks:
+
+1. **Structural** (`app/integrations/jpk/jpk_pit_builder.validate_jpk_pit`) - the header
+   (`KodFormularza`, `WariantFormularza`, `DataOd`, `DataDo`, `CelZlozenia`), ISO dates,
+   two-decimal amounts, NIP checksums and `KwotaBrutto = KwotaNetto + KwotaVat` per row;
+   `Podsumowanie` must equal both the parsed rows and the source documents. Any finding is
+   a `422` with the full violation list.
+2. **XSD** - `app/integrations/schemas.check` compiles the schema registered under
+   `jpk_pit`. **No official JPK_PIT XSD is configured** (`url`/`sha256` are `null` in
+   `config/schemas.yaml`): the existence of a separate JPK_PIT XSD requires confirmation at
+   the source, so nothing is pinned and the status is `skipped`, never an error. Once a
+   verified schema is added (and downloaded with `scripts/fetch_schemas.py`), a
+   non-conforming file becomes a `422`.
+
+A month without revenue/cost documents is a **valid statement with zero totals** (`Liczba*`
+= 0 and every sum `0.00`): a missing period is not an error, it yields a file that can be
+reviewed and filed.
+
+Known limitations:
+
+* The JPK_PIT shape is **provisional**: the namespace is `urn:taxwise:jpk-pit:1-0`, not a
+  `crd.gov.pl` address, so the file cannot be mistaken for an official publication. When an
+  official XSD is confirmed, replace the constants in `jpk_pit_builder` and fill the
+  registry entry together.
+* **The file is never submitted to MF.** There is no MF client, credential or signature in
+  the codebase; the XML/ZIP is meant for review and manual upload by an authorised tool.
+* Rows are selected by `documents.period` (`YYYY-MM`; the tax pack uses the `YYYY-` prefix,
+  so a quarterly `2026-Q1` document is included in the year but not in a month).
+* A revenue/cost row requires `amount_net`, `vat_amount`, `amount_gross = net + VAT`, a PLN
+  currency and a checksum-valid counterparty NIP; a raw upload (`0.00` amounts, no NIP)
+  must be completed first.
+* Only revenue/cost documents are exported; ZUS/PIT/OTHER rows and attachments are ignored.
+* Amounts are not converted: a foreign-currency document is rejected instead of being
+  translated with an unknown rate.
+* The CSV statement is UTF-8, `;`-separated and uses dot decimals (machine-readable, no
+  locale-specific Excel formatting).
 
 
 ## Data model
@@ -413,6 +479,11 @@ Coverage highlights:
   `tests/fixtures/schemas/minimal.xsd`, SKIPPED without a schema, malformed XML as a
   violation, an unusable schema as an error, and `scripts/fetch_schemas.py` (checksum
   verification, atomic write, abort on mismatch, `--check`, optional targets).
+* `tests/test_jpk_pit.py` — the golden JPK_PIT file (`tests/fixtures/jpk_pit_expected.xml`),
+  revenue/cost mapping with `Decimal` amounts and counterparty NIPs, an empty month as a
+  valid zero file, structural validation (header, amount types, row/summary consistency
+  with the documents), `422` paths, `SKIPPED` when no JPK_PIT XSD is configured, and the
+  tax-pack ZIP with a SHA-256 manifest.
 
 ## CI
 
@@ -475,6 +546,11 @@ Coverage highlights:
 * `GET /api/documents/{id}/ksef-xml` takes a JSON body because the `documents` row stores
   only aggregates; once invoices are parsed into line items the body can become optional.
   `?validate=true` reads a local XSD and never fetches one.
+* The JPK_PIT export **never submits anything to MF**: there is no MF client, credential or
+  signature in the codebase. The JPK_PIT format is provisional (local `urn:` namespace) and
+  its XSD is not pinned because the existence of a separate MF JPK_PIT schema requires
+  confirmation at the source; the export reports XSD validation as `skipped` until a
+  verified schema is configured.
 
 ## Verification
 
@@ -493,5 +569,7 @@ linters clean, `/api/tax-params/2026` returns the stored document with `source_u
 
 The KSeF export is covered by `pytest -q tests/test_ksef_fa3.py tests/test_schema_validation.py`;
 the second file needs `scripts/fetch_schemas.py` for the end-to-end check against the
-official schema and skips that one test otherwise.
+official schema and skips that one test otherwise. The JPK_PIT export and tax pack are
+covered by `pytest -q tests/test_jpk_pit.py` (no XSD download is needed - validation is
+expected to report `skipped`).
 
