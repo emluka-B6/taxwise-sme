@@ -16,6 +16,7 @@ retrieval are intentionally left as typed skeletons.
 | Migrations | Alembic (autogenerate + manual review) |
 | Validation / settings | Pydantic v2, pydantic-settings |
 | XML / XSD | `lxml` (FA(3) export and optional XSD validation) |
+| Embeddings | `sentence-transformers` via the optional `embeddings` extra; deterministic hashing fallback for tests |
 | DB | SQLite locally, PostgreSQL in production (`DATABASE_URL`) |
 | Quality | pytest, ruff, mypy (strict) |
 
@@ -58,7 +59,7 @@ app/
     ksef/            # FA(3) invoice builder + structural validation (no KSeF transmission)
     jpk/             # JPK_PIT builder + structural validation (no MF submission)
     schemas.py       # schema registry (config/schemas.yaml) + optional XSD validation
-  assistant/         # retrieval-augmented answers, citations (Protocol only)
+  assistant/         # allowlisted official-source ingestion, embeddings, answer protocols
 config/
   tax_params/        # 2025.yaml, 2026.yaml - legal parameters as data
   schemas.yaml       # XSD urls/checksums + FA(3) format metadata
@@ -229,6 +230,59 @@ file names and storage paths are not logged.
 
 A raw upload has no parsed amount/date yet, so `issue_date`/`period` default to the
 Warsaw date and `amount_gross` is stored as `0.00`; extraction is a later pipeline step.
+
+## Official knowledge base (versioned ingestion)
+
+`app/assistant/ingest.py` builds the citation base from official pages only.
+`ALLOWED_DOMAINS` is `podatki.gov.pl`, `zus.pl`, `isap.sejm.gov.pl` and `gov.pl`
+(subdomains included); the host is checked on the requested URL, on **every redirect hop**
+and again on the final URL, and only HTTPS is accepted. Lookalike hosts
+(`podatki.gov.pl.evil.example`, `evil-podatki.gov.com`) and URLs with embedded credentials
+are rejected before any request is made.
+
+`ingest_url(session, url, embedder=..., fetcher=...)` then:
+
+1. **Fetch** - `urllib` with a 30 s timeout, a 5 MB response cap and an allowlist-checking
+   redirect handler; `fetcher` is injectable, so tests never touch the network.
+2. **Extract** - the title (`<title>`, falling back to `<h1>`), the publication timestamp
+   (`article:published_time`, `og:published_time`, `<meta name="date">`, `<time datetime>`)
+   and the readable text of `<main>`/`<article>` (navigation, asides, scripts and the footer
+   are dropped).
+3. **Chunk** - windows of at most 800 characters with a 160-character overlap, ending on a
+   paragraph, sentence or word boundary; `ordinal` is zero-based per source.
+4. **Version** - `sha256(title + "\n\n" + text)` is the content identity. Identical content
+   is a no-op; changed content inserts a new `knowledge_sources` row with `version + 1`
+   while the previous row and its chunks stay untouched (citations remain reproducible).
+   A digest already indexed under any URL is never stored twice, so `url` alone is not a
+   unique key.
+5. **Embed** - one `embedder.embed(chunk_texts)` call per new version; vectors are stored in
+   `knowledge_chunks.embedding` as JSON text. The function flushes but never commits - the
+   caller owns the transaction, like `tax_params.upsert`.
+
+`app/assistant/embedder.py` defines the `Embedder` protocol (`embed(texts) ->
+list[list[float]]`) with two implementations:
+
+* `SentenceTransformerEmbedder` - the local, semantic model
+  (`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`), imported lazily so the
+  default installation does not pull in torch. Install it with
+  `pip install -e ".[embeddings]"`; a missing extra raises `EmbedderUnavailable`.
+* `HashingEmbedder` - deterministic BLAKE2b feature hashing used by tests and offline runs;
+  it detects that chunks are embedded but carries no semantic meaning.
+
+```python
+from app.assistant import embedder, ingest
+
+result = ingest.ingest_url(
+    session,
+    "https://www.podatki.gov.pl/vat/stawki-vat-2026/",
+    embedder=embedder.SentenceTransformerEmbedder(),
+)
+session.commit()
+print(result.created, result.source.version, result.chunk_count)
+```
+
+The ingestion tests are offline: `pytest -q tests/test_assistant_ingest.py` uses the HTML
+fixtures in `tests/fixtures/sources/` through a fake `Fetcher`.
 
 ## KSeF FA(3) export (no transmission)
 
@@ -484,6 +538,11 @@ Coverage highlights:
   valid zero file, structural validation (header, amount types, row/summary consistency
   with the documents), `422` paths, `SKIPPED` when no JPK_PIT XSD is configured, and the
   tax-pack ZIP with a SHA-256 manifest.
+* `tests/test_assistant_ingest.py` — allowlisted HTML fixture becomes a `KnowledgeSource`
+  with embedded, overlapping chunks; changed content creates `version` 2 while the previous
+  version and its chunks survive; unchanged content is not duplicated (and is not
+  re-embedded); lookalike hosts, HTTP, embedded credentials and redirects outside the
+  allowlist are rejected before any fetch; hashing embedder determinism.
 
 ## CI
 
@@ -537,6 +596,14 @@ Coverage highlights:
   support one); services must select the row with the latest `valid_from` covering a date.
 * Embeddings are JSON text and similarity search is expected to run in Python for now;
   replacing `EmbeddingVector` with a native vector type is a contained migration.
+* Knowledge versions are identified by `sha256(title + text)`, so a page whose markup
+  changes but whose readable text does not keeps its version; `fetched_at` records the
+  re-fetch. The digest lookup is an application-level check (there is no `UNIQUE(sha256)`),
+  so ingestion assumes a single writer. `HashingEmbedder` is a deterministic test/offline
+  fallback, not a semantic model - production should install the `embeddings` extra.
+* Only HTML pages are ingested; a response without `<main>`/`<article>`/body text or with an
+  explicit non-HTML content type is rejected instead of indexed empty. PDFs and XSDs stay
+  with the document intake and `scripts/fetch_schemas.py` respectively.
 * `/health` is a liveness probe without a database check by design; a separate readiness
   probe should query the DB when deployment needs it.
 * No authentication/authorisation layer is included in the skeleton.
@@ -571,5 +638,7 @@ The KSeF export is covered by `pytest -q tests/test_ksef_fa3.py tests/test_schem
 the second file needs `scripts/fetch_schemas.py` for the end-to-end check against the
 official schema and skips that one test otherwise. The JPK_PIT export and tax pack are
 covered by `pytest -q tests/test_jpk_pit.py` (no XSD download is needed - validation is
-expected to report `skipped`).
+expected to report `skipped`). Knowledge-base ingestion is covered by
+`pytest -q tests/test_assistant_ingest.py`; it needs no network access because the HTML
+fixtures live in `tests/fixtures/sources/`.
 

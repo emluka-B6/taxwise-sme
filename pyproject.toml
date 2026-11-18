@@ -30,6 +30,8 @@ dev = [
     "types-pyyaml>=6.0",
 ]
 postgres = ["psycopg[binary]>=3.2"]
+# Local embedding backend for the assistant knowledge base; tests use the hashing fallback.
+embeddings = ["sentence-transformers>=3.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
@@ -77,4 +79,10 @@ ignore_missing_imports = true
 # lxml ships compiled extension modules without type information.
 [[tool.mypy.overrides]]
 module = ["lxml", "lxml.etree"]
+ignore_missing_imports = true
+
+# Optional local embedding backend (the `embeddings` extra); imported lazily by
+# `app.assistant.embedder` and absent from the default installation.
+[[tool.mypy.overrides]]
+module = ["sentence_transformers"]
 ignore_missing_imports = true
