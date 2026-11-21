@@ -84,6 +84,12 @@ All settings are environment variables (or `.env`), parsed by `app.settings.Sett
 | `DEBUG` | `false` | Passed to FastAPI |
 | `SQL_ECHO` | `false` | SQLAlchemy statement logging |
 | `DOCUMENTS_DIR` | `./documents` | Content-addressed upload storage root (`app/services/storage.py`); gitignored |
+| `ASSISTANT_MIN_SCORE` | `0.25` | Cosine threshold for retrieval; below it the answer is `insufficient sources` |
+| `ASSISTANT_TOP_K` | `5` | Chunks passed to the answer provider |
+| `ASSISTANT_EMBEDDER` | `hashing` | `hashing` (deterministic) or `sentence-transformers` (optional extra) |
+| `ASSISTANT_LLM` | `stub` | `stub` (deterministic, no network) or `openai` (OpenAI-compatible) |
+| `ASSISTANT_LLM_API_KEY` | unset | Read from the environment only; never committed |
+| `ASSISTANT_RATE_LIMIT_PER_MINUTE` | `20` | Per-client sliding window for `POST /api/assistant/ask` |
 
 Tax rates and thresholds are **not** settings and **not** constants: they are rows in
 `tax_year_params` (versioned, source-linked) and per-taxpayer values in `tax_profiles`.
@@ -283,6 +289,40 @@ print(result.created, result.source.version, result.chunk_count)
 
 The ingestion tests are offline: `pytest -q tests/test_assistant_ingest.py` uses the HTML
 fixtures in `tests/fixtures/sources/` through a fake `Fetcher`.
+
+## Assistant answers (citations, refusal, disclaimer)
+
+`POST /api/assistant/ask` answers **only** from the versioned chunks above:
+
+1. `app/assistant/retriever.py` embeds the question with the configured embedder, scores
+   every chunk by cosine similarity and keeps the top `ASSISTANT_TOP_K` at or above
+   `ASSISTANT_MIN_SCORE`. Sources outside the ingestion allowlist are skipped, so they can
+   never become citations.
+2. With no chunk above the threshold the answer is the literal `insufficient sources` and
+   the model is **not called**.
+3. Otherwise `app/assistant/answer.py` builds a prompt requiring a `[source_id]` marker and
+   the source's `published_at` for every claim. The provider is selected by
+   `ASSISTANT_LLM`: `stub` (default, deterministic) or `openai` (any OpenAI-compatible
+   endpoint; key from `ASSISTANT_LLM_API_KEY`). The service re-derives citations from the
+   markers, rejecting answers without a marker or with an unknown/non-allowlisted source.
+4. Every answer, including refusals, is stored in `assistant_answers` with its citations
+   and `disclaimer_shown=True`, and the API always returns the disclaimer.
+
+```bash
+curl -s -X POST localhost:8000/api/assistant/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "Jakie są stawki VAT w 2026 roku?"}'
+# {"answer": "... [1] (data publikacji: 2026-01-15)",
+#  "citations": [{"source_id": 1, "url": "https://www.podatki.gov.pl/...",
+#                 "title": "...", "published_at": "...", "fetched_at": "...",
+#                 "version": "2", "chunk_ordinal": 0}],
+#  "disclaimer": "Informacje mają charakter informacyjny ..."}
+```
+
+The endpoint rate-limits per client host (`429` + `Retry-After`) and its logs contain only
+the question length, citation count and refusal flag - never the question or answer text.
+`pytest -q tests/test_assistant_answer.py` covers coverage/refusal, the disclaimer on
+every answer, allowlisted citation URLs and the source version.
 
 ## KSeF FA(3) export (no transmission)
 
@@ -543,6 +583,14 @@ Coverage highlights:
   version and its chunks survive; unchanged content is not duplicated (and is not
   re-embedded); lookalike hosts, HTTP, embedded credentials and redirects outside the
   allowlist are rejected before any fetch; hashing embedder determinism.
+* `tests/test_assistant_answer.py` — cosine top-k/threshold retrieval, a covered question
+  returns citations with URL, dates and source version, no coverage returns
+  `insufficient sources` without calling the model, every stored answer has
+  `disclaimer_shown=True`, citations stay inside the allowlist, the prompt requires
+  `[source_id]` + `published_at`, the LLM backend is env-swappable (stub default), the
+  endpoint returns answer/citations/disclaimer, rate-limits per client and logs no
+  question content.
+
 
 ## CI
 

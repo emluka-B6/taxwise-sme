@@ -11,7 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Final, Literal
 
-from pydantic import field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ALLOWED_DATABASE_SCHEMES = frozenset({"sqlite", "postgresql"})
@@ -40,6 +40,29 @@ class Settings(BaseSettings):
     sql_echo: bool = False
     documents_dir: Path = DOCUMENTS_DIR
 
+    # --- assistant ---------------------------------------------------------
+    #: Minimum cosine similarity a chunk must reach to be used as a source.
+    assistant_min_score: float = 0.25
+    #: Number of chunks handed to the answer provider (highest scores first).
+    assistant_top_k: int = Field(default=5, ge=1, le=50)
+    #: ``hashing`` is deterministic and dependency-free; ``sentence-transformers`` is the
+    #: optional local extra. The value must match the embedder used during ingestion.
+    assistant_embedder: str = "hashing"
+    assistant_embedding_model: str = (
+        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    )
+    #: ``stub`` (default, deterministic) or ``openai`` (any OpenAI-compatible chat API).
+    assistant_llm: str = "stub"
+    assistant_llm_model: str = "gpt-4o-mini"
+    #: Read from the environment only; never commit a real key. ``None`` disables the
+    #: ``openai`` provider with a clear configuration error instead of a network call.
+    assistant_llm_api_key: SecretStr | None = None
+    assistant_llm_base_url: str = "https://api.openai.com/v1"
+    assistant_llm_timeout_seconds: float = Field(default=30.0, gt=0.0)
+    #: Sliding-window rate limit for ``POST /api/assistant/ask`` per client host.
+    assistant_rate_limit_per_minute: int = Field(default=20, ge=1, le=10_000)
+    assistant_rate_limit_window_seconds: float = Field(default=60.0, gt=0.0)
+
     @field_validator("database_url")
     @classmethod
     def _check_database_url(cls, value: str) -> str:
@@ -49,6 +72,19 @@ class Settings(BaseSettings):
                 f"DATABASE_URL must use one of {sorted(ALLOWED_DATABASE_SCHEMES)}, got {scheme!r}"
             )
         return value
+
+    @field_validator("assistant_min_score")
+    @classmethod
+    def _check_min_score(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"ASSISTANT_MIN_SCORE must be within [0, 1], got {value}")
+        return value
+
+    @field_validator("assistant_llm", "assistant_embedder")
+    @classmethod
+    def _normalise_provider_names(cls, value: str) -> str:
+        return value.strip().lower()
+
 
 
 @lru_cache(maxsize=1)

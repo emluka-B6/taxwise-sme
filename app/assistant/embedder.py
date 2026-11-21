@@ -22,7 +22,10 @@ import math
 import re
 import unicodedata
 from collections.abc import Sequence
-from typing import Any, Final, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from app.settings import Settings
 
 __all__ = [
     "DEFAULT_EMBEDDING_DIMENSION",
@@ -31,6 +34,7 @@ __all__ = [
     "EmbedderUnavailable",
     "HashingEmbedder",
     "SentenceTransformerEmbedder",
+    "build_embedder",
 ]
 
 #: Width of the deterministic fallback vector; small enough to keep test fixtures fast.
@@ -122,3 +126,22 @@ class SentenceTransformerEmbedder:
         )
         vectors: list[list[float]] = [[float(value) for value in row] for row in encoded]
         return vectors
+
+
+def build_embedder(settings: Settings) -> Embedder:
+    """Build the embedder selected by ``ASSISTANT_EMBEDDER``.
+
+    ``hashing`` (the default) needs no optional dependency and makes tests deterministic;
+    ``sentence-transformers`` is the production quality option but requires the
+    ``embeddings`` extra. The retrieval side must use the same backend as ingestion,
+    otherwise vectors live in different spaces.
+    """
+    backend = settings.assistant_embedder.strip().lower()
+    if backend == "hashing":
+        return HashingEmbedder()
+    if backend in {"sentence-transformers", "sentence_transformers"}:
+        return SentenceTransformerEmbedder(settings.assistant_embedding_model)
+    raise ValueError(
+        "ASSISTANT_EMBEDDER must be 'hashing' or 'sentence-transformers', "
+        f"got {settings.assistant_embedder!r}"
+    )

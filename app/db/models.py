@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import (
     Boolean,
@@ -240,7 +241,11 @@ class AssistantAnswer(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     question: Mapped[str] = mapped_column(Text, nullable=False)
     answer: Mapped[str] = mapped_column(Text, nullable=False)
-    citations: Mapped[list[str] | None] = mapped_column(JSONType, nullable=True)
+    citations: Mapped[list[Any] | None] = mapped_column(
+        JSONType,
+        nullable=True,
+        doc="Citation objects (url, title, published_at, fetched_at, version) or legacy URLs.",
+    )
     model: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
