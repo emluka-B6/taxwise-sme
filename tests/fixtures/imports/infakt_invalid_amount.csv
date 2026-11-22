@@ -1,0 +1,4 @@
+Numer dokumentu;Data wystawienia;Netto;VAT;Brutto;Waluta;NIP nabywcy;Rodzaj
+FV/2026/03/101;2026-03-01;100,00;23,00;123,00;PLN;5260250995;sprzedaż
+FV/2026/03/102;2026-03-02;200,00;46,00;abc;PLN;5260250995;zakup
+FV/2026/03/103;2026-03-03;300,00;69,00;369,00;PLN;5260250995;sprzedaż

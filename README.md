@@ -3,8 +3,9 @@
 Skeleton of a finance assistant for Polish sole proprietorships (JDG, B2B): document
 intake, tax profile, deadlines, an auditable decision log, a citation-backed knowledge base
 and a deterministic tax/contribution calculation engine. This repository contains the
-**data model, migrations, API bootstrap, calculation formulas and CI** — importers and
-retrieval are intentionally left as typed skeletons.
+**data model, migrations, API bootstrap, calculation formulas and CI** — the REST
+importer and retrieval are intentionally left as typed skeletons; CSV imports from the
+Polish accounting tools are implemented.
 
 ## Stack
 
@@ -55,13 +56,15 @@ app/
     models.py        # all ORM models
     session.py       # lazy engine/session factories, FastAPI dependency
   services/          # tax params, pure calc engine, deadlines, ingest, classifier, storage
-  integrations/      # inFakt / Fakturownia / wFirma adapters (Protocol only)
+  integrations/      # external adapters
+    accounting/      # AccountingProvider protocol, CSV importers, REST API skeleton
     ksef/            # FA(3) invoice builder + structural validation (no KSeF transmission)
     jpk/             # JPK_PIT builder + structural validation (no MF submission)
     schemas.py       # schema registry (config/schemas.yaml) + optional XSD validation
   assistant/         # allowlisted official-source ingestion, embeddings, answer protocols
 config/
   tax_params/        # 2025.yaml, 2026.yaml - legal parameters as data
+  import_mappings/   # versioned inFakt / Fakturownia / wFirma column mappings
   schemas.yaml       # XSD urls/checksums + FA(3) format metadata
 scripts/
   seed_tax_params.py # idempotent loader: YAML -> tax_year_params
@@ -90,6 +93,10 @@ All settings are environment variables (or `.env`), parsed by `app.settings.Sett
 | `ASSISTANT_LLM` | `stub` | `stub` (deterministic, no network) or `openai` (OpenAI-compatible) |
 | `ASSISTANT_LLM_API_KEY` | unset | Read from the environment only; never committed |
 | `ASSISTANT_RATE_LIMIT_PER_MINUTE` | `20` | Per-client sliding window for `POST /api/assistant/ask` |
+| `ACCOUNTING_API_URL` | unset | Base URL for `ApiProvider`; there is no default URL |
+| `ACCOUNTING_API_TOKEN` | unset | Bearer token for `ApiProvider`; read from the environment only |
+| `ACCOUNTING_API_INVOICES_PATH` | `invoices` | Path appended to `ACCOUNTING_API_URL` |
+| `ACCOUNTING_API_TIMEOUT_SECONDS` | `30` | HTTP timeout for the invoice API |
 
 Tax rates and thresholds are **not** settings and **not** constants: they are rows in
 `tax_year_params` (versioned, source-linked) and per-taxpayer values in `tax_profiles`.
@@ -236,6 +243,33 @@ file names and storage paths are not logged.
 
 A raw upload has no parsed amount/date yet, so `issue_date`/`period` default to the
 Warsaw date and `amount_gross` is stored as `0.00`; extraction is a later pipeline step.
+
+## Invoice imports from accounting platforms
+
+`POST /api/imports/{provider}` accepts a multipart CSV export (field `file`). Supported
+providers are `infakt`, `fakturownia` and `wfirma`; the column mapping for each lives in
+`config/import_mappings/<provider>.yaml` and is versioned (`version` must be bumped on a
+column change). The required external-id/date/gross columns are validated by the mapping, and money
+accepts both `1230.00` and Polish `1 230,00`.
+
+```bash
+curl -s -X POST localhost:8000/api/imports/infakt \
+  -F 'file=@eksport_faktur.csv;type=text/csv'
+# {"created": 2, "updated": 0, "skipped": 0, "errors": []}
+```
+
+The importer upserts by `(source, external_id)`:
+
+* new id -> `created`;
+* identical data re-imported -> `skipped` (no duplicate rows);
+* changed data -> `updated` and `status=VERIFIED` (manual verification required);
+* an invalid amount/date/NIP is reported in `errors[]` with its row number while every
+  other row is imported.
+
+`app/integrations/accounting/api_provider.py` is the REST skeleton. `ACCOUNTING_API_URL`
+and `ACCOUNTING_API_TOKEN` come from the environment; without both it raises
+`ProviderConfigurationError` *before* making any HTTP request. There is no default URL
+and no secret in the repository.
 
 ## Official knowledge base (versioned ingestion)
 
@@ -681,6 +715,9 @@ script fetches and verifies the FA(3) XSDs (`resources/`, optional), all tests p
 linters clean, `/api/tax-params/2026` returns the stored document with `source_url` and
 `effective_from`, and `/health` returns
 `{"status":"ok","app":"TaxWise SME API","version":"0.1.0","environment":"local"}`.
+
+Invoice imports are covered by `pytest -q tests/test_import.py` (CSV fixtures under
+`tests/fixtures/imports/`, no network access).
 
 The KSeF export is covered by `pytest -q tests/test_ksef_fa3.py tests/test_schema_validation.py`;
 the second file needs `scripts/fetch_schemas.py` for the end-to-end check against the

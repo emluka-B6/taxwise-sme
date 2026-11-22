@@ -63,6 +63,16 @@ class Settings(BaseSettings):
     assistant_rate_limit_per_minute: int = Field(default=20, ge=1, le=10_000)
     assistant_rate_limit_window_seconds: float = Field(default=60.0, gt=0.0)
 
+    # --- invoice API imports ----------------------------------------------
+    #: Base URL of an accounting platform API. There is deliberately no default:
+    #: the ``ApiProvider`` skeleton refuses to run until an operator configures it.
+    accounting_api_url: str | None = None
+    #: Read from the environment only; never commit a real token.
+    accounting_api_token: SecretStr | None = None
+    #: Path appended to ``ACCOUNTING_API_URL`` (e.g. ``invoices``).
+    accounting_api_invoices_path: str = "invoices"
+    accounting_api_timeout_seconds: float = Field(default=30.0, gt=0.0)
+
     @field_validator("database_url")
     @classmethod
     def _check_database_url(cls, value: str) -> str:

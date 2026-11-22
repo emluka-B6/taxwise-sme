@@ -1,0 +1,53 @@
+# Versioned column mapping for Fakturownia invoice exports.
+#
+# `version` must be bumped whenever a column alias or a document-type label
+# changes here. Amounts may use Polish formatting ("1 230,00") - the importer
+# normalises them to Decimal.
+version: 1
+provider: fakturownia
+source: IMPORT_FAKTUROWNIA
+
+# Fakturownia's default export is comma-separated UTF-8.
+delimiter: ","
+encoding: "utf-8-sig"
+currency: "PLN"
+date_formats:
+  - "%d.%m.%Y"
+  - "%Y-%m-%d"
+
+columns:
+  external_id:
+    - "Numer"
+    - "Numer faktury"
+  issue_date:
+    - "Data wystawienia"
+    - "Data wydania"
+  period:
+    - "Okres"
+  amount_net:
+    - "Wartość netto"
+    - "Netto"
+  vat_amount:
+    - "Wartość VAT"
+    - "VAT"
+  amount_gross:
+    - "Wartość brutto"
+    - "Brutto"
+  currency:
+    - "Waluta"
+  counterparty_nip:
+    - "NIP kontrahenta"
+    - "NIP"
+  document_type:
+    - "Typ"
+    - "Rodzaj"
+
+document_type:
+  default: VAT_INVOICE_COST
+  values:
+    "sprzedaż": VAT_INVOICE_SALES
+    "sprzedaz": VAT_INVOICE_SALES
+    "sales": VAT_INVOICE_SALES
+    "zakup": VAT_INVOICE_COST
+    "koszt": VAT_INVOICE_COST
+    "cost": VAT_INVOICE_COST

@@ -1,0 +1,50 @@
+# Versioned column mapping for inFakt invoice exports.
+#
+# `version` must be bumped whenever a column alias or a document-type label
+# changes here. The importer reads this file at request time, so a vendor export
+# change is a configuration change - never a Python change.
+version: 1
+provider: infakt
+source: IMPORT_INFAKT
+
+# inFakt exports semicolon-separated UTF-8 files (often with a BOM).
+delimiter: ";"
+encoding: "utf-8-sig"
+currency: "PLN"
+date_formats:
+  - "%Y-%m-%d"
+  - "%d.%m.%Y"
+
+columns:
+  external_id:
+    - "Numer dokumentu"
+    - "Numer"
+  issue_date:
+    - "Data wystawienia"
+    - "Data sprzedaży"
+  period:
+    - "Okres"
+  amount_net:
+    - "Netto"
+  vat_amount:
+    - "VAT"
+  amount_gross:
+    - "Brutto"
+  currency:
+    - "Waluta"
+  counterparty_nip:
+    - "NIP nabywcy"
+    - "NIP"
+  document_type:
+    - "Rodzaj"
+    - "Typ"
+
+document_type:
+  default: VAT_INVOICE_COST
+  values:
+    "sprzedaż": VAT_INVOICE_SALES
+    "sprzedaz": VAT_INVOICE_SALES
+    "sales": VAT_INVOICE_SALES
+    "zakup": VAT_INVOICE_COST
+    "koszt": VAT_INVOICE_COST
+    "cost": VAT_INVOICE_COST

@@ -1,0 +1,53 @@
+# Versioned column mapping for wFirma invoice exports.
+#
+# `version` must be bumped whenever a column alias or a document-type label
+# changes here. The importer never guesses a column: only the aliases below are
+# accepted, and a missing required column rejects the file with a clear error.
+version: 1
+provider: wfirma
+source: IMPORT_WFIRMA
+
+# wFirma exports semicolon-separated UTF-8 files.
+delimiter: ";"
+encoding: "utf-8-sig"
+currency: "PLN"
+date_formats:
+  - "%d.%m.%Y"
+  - "%Y-%m-%d"
+
+columns:
+  external_id:
+    - "Numer faktury"
+    - "Numer dokumentu"
+  issue_date:
+    - "Data wystawienia"
+    - "Data dokumentu"
+  period:
+    - "Okres"
+  amount_net:
+    - "Netto"
+    - "Wartość netto"
+  vat_amount:
+    - "VAT"
+    - "Wartość VAT"
+  amount_gross:
+    - "Brutto"
+    - "Wartość brutto"
+  currency:
+    - "Waluta"
+  counterparty_nip:
+    - "NIP"
+    - "NIP kontrahenta"
+  document_type:
+    - "Typ dokumentu"
+    - "Typ"
+
+document_type:
+  default: VAT_INVOICE_COST
+  values:
+    "sprzedaż": VAT_INVOICE_SALES
+    "sprzedaz": VAT_INVOICE_SALES
+    "sales": VAT_INVOICE_SALES
+    "zakup": VAT_INVOICE_COST
+    "koszt": VAT_INVOICE_COST
+    "cost": VAT_INVOICE_COST
