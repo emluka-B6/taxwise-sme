@@ -15,6 +15,7 @@ from app.api import (
     imports_router,
     ksef_export_router,
     tax_params_router,
+    ui_router,
 )
 from app.settings import Settings, get_settings
 
@@ -39,6 +40,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(imports_router)
     application.include_router(ksef_export_router)
     application.include_router(exports_router)
+    application.include_router(ui_router)
     return application
 
 

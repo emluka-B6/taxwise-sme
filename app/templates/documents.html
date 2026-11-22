@@ -1,0 +1,72 @@
+{% if not hx_request %}{% extends "base.html" %}{% endif %}
+{% block content %}
+<section id="documents-panel" class="panel">
+  <h1>Dokumenty</h1>
+
+  <form action="/documents" method="get"
+        hx-get="/documents" hx-target="#documents-panel" hx-swap="outerHTML"
+        hx-push-url="true">
+    <label for="document-type">Typ
+      <select id="document-type" name="type">
+        <option value="">Wszystkie</option>
+        {% for value in document_types %}
+        <option value="{{ value }}"{% if type_filter and type_filter.value == value %} selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label for="document-status">Status
+      <select id="document-status" name="status">
+        <option value="">Wszystkie</option>
+        {% for value in document_statuses %}
+        <option value="{{ value }}"{% if status_filter and status_filter.value == value %} selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">Filtruj</button>
+  </form>
+
+  <form action="/documents" method="post" enctype="multipart/form-data"
+        hx-post="/documents" hx-encoding="multipart/form-data"
+        hx-target="#documents-panel" hx-swap="outerHTML">
+    {% if type_filter %}<input type="hidden" name="type" value="{{ type_filter.value }}">{% endif %}
+    {% if status_filter %}<input type="hidden" name="status" value="{{ status_filter.value }}">{% endif %}
+    <label for="document-file">Nowy dokument (PDF, XML lub CSV, do 10 MB)
+      <input id="document-file" type="file" name="file" accept=".pdf,.xml,.csv" required>
+    </label>
+    <button type="submit">Wgraj</button>
+  </form>
+
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">ID</th>
+          <th scope="col">Typ</th>
+          <th scope="col">Status</th>
+          <th scope="col">Okres</th>
+          <th scope="col">Data wystawienia</th>
+          <th scope="col">Kwota brutto</th>
+          <th scope="col">Plik</th>
+        </tr>
+      </thead>
+      <tbody id="documents-list">
+        {% for document in documents %}
+        <tr>
+          <td>{{ document.id }}</td>
+          <td>{{ document.type.value }}</td>
+          <td>{{ document.status.value }}</td>
+          <td>{{ document.period }}</td>
+          <td>{{ document.issue_date }}</td>
+          <td class="num">{{ document.amount_gross }}</td>
+          <td class="mono">{{ document.file_path or "" }}</td>
+        </tr>
+        {% else %}
+        <tr><td class="empty" colspan="7">Brak dokumentów.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

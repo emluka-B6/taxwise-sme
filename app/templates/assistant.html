@@ -1,0 +1,45 @@
+{% if not hx_request %}{% extends "base.html" %}{% endif %}
+{% block content %}
+<section id="assistant-panel" class="panel">
+  <h1>Asystent podatkowy</h1>
+
+  <form action="/assistant" method="post"
+        hx-post="/assistant" hx-target="#assistant-panel" hx-swap="outerHTML">
+    <label for="assistant-question">Pytanie
+      <textarea id="assistant-question" name="question" rows="4"
+                maxlength="{{ max_question_chars }}" required>{{ question }}</textarea>
+    </label>
+    <button type="submit">Zapytaj</button>
+  </form>
+
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+
+  <p class="disclaimer" id="assistant-disclaimer">{{ disclaimer }}</p>
+
+  {% if answer %}
+  <article class="answer" id="assistant-answer">
+    <h2>Odpowiedź</h2>
+    <p>{{ answer }}</p>
+
+    <h3>Źródła</h3>
+    {% if citations %}
+    <ol>
+      {% for citation in citations %}
+      <li>
+        <a href="{{ citation.url }}" rel="noopener noreferrer">{{ citation.title }}</a>
+        <span class="meta">
+          {% if citation.published_at %}publikacja: {{ citation.published_at }}{% endif %}
+          {% if citation.fetched_at %} · pobrano: {{ citation.fetched_at }}{% endif %}
+          {% if citation.version %} · wersja: {{ citation.version }}{% endif %}
+          {% if citation.chunk_ordinal is not none %} · fragment: {{ citation.chunk_ordinal }}{% endif %}
+        </span>
+      </li>
+      {% endfor %}
+    </ol>
+    {% else %}
+    <p class="meta">Odpowiedź nie cytuje żadnego źródła.</p>
+    {% endif %}
+  </article>
+  {% endif %}
+</section>
+{% endblock %}

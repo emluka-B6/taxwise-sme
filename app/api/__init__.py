@@ -10,6 +10,7 @@ from app.api.health import router as health_router
 from app.api.imports import router as imports_router
 from app.api.ksef_export import router as ksef_export_router
 from app.api.tax_params import router as tax_params_router
+from app.api.ui import router as ui_router
 
 __all__ = [
     "assistant_router",
@@ -22,4 +23,5 @@ __all__ = [
     "imports_router",
     "ksef_export_router",
     "tax_params_router",
+    "ui_router",
 ]
