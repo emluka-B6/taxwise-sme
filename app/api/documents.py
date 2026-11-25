@@ -39,7 +39,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Document
 from app.db.session import get_session
 from app.domain.enums import DocumentSource, DocumentStatus, DocumentType
-from app.services import classifier, storage
+from app.services import audit, classifier, storage
 from app.services import deadlines as deadlines_service
 
 __all__ = [
@@ -277,6 +277,19 @@ def upload_document(
         status=DocumentStatus.CLASSIFIED,
     )
     session.add(row)
+    session.flush()
+    audit.record(
+        session,
+        action=audit.AuditAction.DOCUMENT_UPLOADED,
+        entity="document",
+        entity_id=row.id,
+        meta={
+            "type": row.type.value,
+            "status": row.status.value,
+            "source": row.source.value,
+            "bytes": len(data),
+        },
+    )
     session.commit()
     session.refresh(row)
     logger.info("document ingested: id=%s bytes=%d", row.id, len(data))
@@ -300,10 +313,29 @@ def update_document(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail=f"Document {document_id} does not exist.",
         )
+    previous_type = row.type
+    previous_status = row.status
     if payload.type is not None:
         row.type = payload.type
     if payload.status is not None:
         row.status = payload.status
+    status_changed = row.status != previous_status
+    audit.record(
+        session,
+        action=(
+            audit.AuditAction.DOCUMENT_STATUS_CHANGED
+            if status_changed
+            else audit.AuditAction.DOCUMENT_UPDATED
+        ),
+        entity="document",
+        entity_id=row.id,
+        meta={
+            "previous_type": previous_type.value,
+            "type": row.type.value,
+            "previous_status": previous_status.value,
+            "status": row.status.value,
+        },
+    )
     session.commit()
     session.refresh(row)
     return _read(row)

@@ -48,6 +48,7 @@ from app.domain.enums import (
 
 __all__ = [
     "AssistantAnswer",
+    "AuditLog",
     "Deadline",
     "Decision",
     "Document",
@@ -252,6 +253,35 @@ class AssistantAnswer(Base):
     )
     disclaimer_shown: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=true()
+    )
+
+
+class AuditLog(Base):
+    """Append-only audit trail of security-relevant actions.
+
+    ``meta`` is a small JSON object of operational facts (counts, enum values, years). It
+    is validated by ``app.services.audit`` so that no personal data is ever persisted
+    here; the audit trail must not become a second personal-data store.
+    """
+
+    __tablename__ = "audit_log"
+    __table_args__ = (
+        Index("ix_audit_log_at", "at"),
+        Index("ix_audit_log_entity_entity_id", "entity", "entity_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    actor: Mapped[str] = mapped_column(
+        String(64), nullable=False, doc="Stable, non-identifying label, e.g. 'api'."
+    )
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    meta: Mapped[dict[str, Any]] = mapped_column(
+        JSONType, nullable=False, doc="Allowlisted, PII-free operational facts only."
     )
 
 

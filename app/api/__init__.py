@@ -1,5 +1,6 @@
 """HTTP layer: routers and request/response schemas."""
 
+from app.api.admin import router as admin_router
 from app.api.assistant import router as assistant_router
 from app.api.calc import router as calc_router
 from app.api.deadlines import router as deadlines_router
@@ -13,6 +14,7 @@ from app.api.tax_params import router as tax_params_router
 from app.api.ui import router as ui_router
 
 __all__ = [
+    "admin_router",
     "assistant_router",
     "calc_router",
     "deadlines_router",

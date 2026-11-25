@@ -29,10 +29,15 @@ source .venv/bin/activate
 pip install -e ".[dev]"          # add ",postgres" to use PostgreSQL locally
 
 cp .env.example .env             # optional; defaults to SQLite in ./taxwise.db
-alembic upgrade head             # creates all tables
+alembic upgrade head             # creates all tables (incl. audit_log)
 uvicorn app.main:app --reload    # http://127.0.0.1:8000/health
 curl -s localhost:8000/health
 ```
+
+Set `RETENTION_CONFIRMATION_TOKEN` in the environment before running a destructive
+retention purge; without it the purge endpoint answers `403` and deletes nothing. See
+[Retention, audit trail and data export](#retention-audit-trail-and-data-export-gdpr) and
+[PRIVACY.md](PRIVACY.md).
 
 Using PostgreSQL instead of SQLite is a one-line change:
 
@@ -47,15 +52,16 @@ alembic upgrade head
 app/
   main.py            # FastAPI app factory + ASGI entrypoint
   settings.py        # pydantic-settings (DATABASE_URL, ENVIRONMENT, ...)
-  api/               # routers: health, tax_params, calc, deadlines, decisions, documents,
-                     # ksef export, period exports (JPK_PIT / tax pack)
+  api/               # routers: health, admin (retention / GDPR export), tax_params, calc,
+                     # deadlines, decisions, documents, ksef export, period exports
   domain/            # pure enums, no infrastructure imports
   db/
     base.py          # DeclarativeBase + deterministic naming convention
     types.py         # JSONType, EmbeddingVector, sa_enum (cross-dialect)
-    models.py        # all ORM models
+    models.py        # all ORM models (incl. audit_log)
     session.py       # lazy engine/session factories, FastAPI dependency
-  services/          # tax params, pure calc engine, deadlines, ingest, classifier, storage
+  services/          # tax params, calc, deadlines, ingest, classifier, storage, audit,
+                     # retention (dry run + token-gated irreversible purge)
   integrations/      # external adapters
     accounting/      # AccountingProvider protocol, CSV importers, REST API skeleton
     ksef/            # FA(3) invoice builder + structural validation (no KSeF transmission)
@@ -73,7 +79,9 @@ alembic/
   env.py             # URL from DATABASE_URL, batch mode on SQLite
   versions/0001_initial.py
   versions/0002_deadline_statuses_and_unique_key.py
-tests/               # schema, API, migration and policy tests
+  versions/0003_audit_log.py
+PRIVACY.md           # data scope, retention, data-subject rights and limitations
+tests/               # schema, API, migration, retention and policy tests
 ```
 
 ## Configuration
@@ -87,6 +95,8 @@ All settings are environment variables (or `.env`), parsed by `app.settings.Sett
 | `DEBUG` | `false` | Passed to FastAPI |
 | `SQL_ECHO` | `false` | SQLAlchemy statement logging |
 | `DOCUMENTS_DIR` | `./documents` | Content-addressed upload storage root (`app/services/storage.py`); gitignored |
+| `RETENTION_YEARS` | `5` | Documents whose `created_at` is older than this are retention candidates |
+| `RETENTION_CONFIRMATION_TOKEN` | unset | Required (header `X-Retention-Token`) for an irreversible purge; unset disables deletion |
 | `ASSISTANT_MIN_SCORE` | `0.25` | Cosine threshold for retrieval; below it the answer is `insufficient sources` |
 | `ASSISTANT_TOP_K` | `5` | Chunks passed to the answer provider |
 | `ASSISTANT_EMBEDDER` | `hashing` | `hashing` (deterministic) or `sentence-transformers` (optional extra) |
@@ -130,6 +140,16 @@ curl -s localhost:8000/api/tax-params/2026  # source_url + effective_from + payl
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/tax-params/{year}` | Stored, validated document of the highest version (404 when the year was never seeded) |
+
+### Updating annual parameters
+
+1. Add `config/tax_params/<year>.yaml` (or bump `version` in the existing year) and set a
+   specific official `source_url` plus `effective_from`; rates stay decimal fractions.
+2. Run `python scripts/seed_tax_params.py` (idempotent, `--year`/`--no-deadlines` available).
+3. Verify with `curl -s localhost:8000/api/tax-params/<year>` and `pytest -q
+   tests/test_tax_params.py tests/test_calc.py`.
+4. No code change or migration is needed: calculation and deadlines read the stored data.
+   Keep the previous version row so past periods remain reproducible.
 
 ## Calculation preview
 
@@ -511,6 +531,69 @@ Known limitations:
   locale-specific Excel formatting).
 
 
+## Retention, audit trail and data export (GDPR)
+
+Operational and GDPR controls live in `app/services/retention.py`,
+`app/services/audit.py` and `app/api/admin.py`; `PRIVACY.md` describes the data scope,
+retention rule, data-subject rights and the remaining limitations.
+
+### Retention
+
+A document is expired when its `created_at` is **strictly older** than
+`RETENTION_YEARS` (default `5`, a calendar subtraction from "now" in UTC). The window is
+measured from storage time, not from the end of the tax year, so keep it conservative
+relative to the statutory accounting period. The policy is applied to `documents`; files
+in `DOCUMENTS_DIR` are deleted with their row only when no retained document references
+the same content-addressed file.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/admin/retention/run?dry_run=true` | Read-only scan (the default): returns candidates, `deleted: 0`, writes no audit row and changes nothing |
+| `POST /api/admin/retention/run?dry_run=false` | **Irreversible purge** of the candidates: files and rows; requires `X-Retention-Token` and writes one `RETENTION_PURGE` audit entry |
+
+The token must equal `RETENTION_CONFIRMATION_TOKEN` from the environment. A missing,
+empty or wrong token, or an unset ENV variable, is answered with `403` and no data is
+touched. Use a dry run first:
+
+```bash
+curl -s -X POST 'localhost:8000/api/admin/retention/run?dry_run=true'
+curl -s -X POST 'localhost:8000/api/admin/retention/run?dry_run=false' \
+  -H "X-Retention-Token: $RETENTION_CONFIRMATION_TOKEN"
+```
+
+The purge is not scheduled and there is no undo. Take a database and `DOCUMENTS_DIR`
+backup before running it; deletion is final (the audit row records counts, the cutoff and
+the retention window, not the removed content or file names). The response reports
+`deleted`, `files_deleted` and the `audit_id`.
+
+### Audit trail
+
+`audit_log` is append-only: there is no API that updates or deletes its rows. Each row has
+`actor`, `action`, `entity`, `entity_id`, `at` and a small JSON `meta`. Rows are written
+for uploads, document corrections/status changes, CSV imports, every export (JPK_PIT, tax
+pack, FA(3), data export) and each confirmed retention purge.
+
+`meta` is deliberately restricted by `app.services.audit`: only keys from
+`ALLOWED_META_KEYS`, only scalar values, and no e-mail/PESEL/NIP-shaped strings. Callers
+pass counts, enum values, years and a cutoff - never a file name, a document excerpt, a
+contractor name or a NIP. **The audit trail therefore contains no personal data**, and the
+application log lines carry only the action, entity label and database id (never `meta`,
+file contents or paths).
+
+### Data export
+
+`GET /api/admin/export-data` returns one JSON document (`export_version: 1`) with every
+category the application stores:
+
+* `tax_profiles`, `documents` (metadata and amounts as decimal strings), `deadlines`,
+  `decisions`, `assistant_answers` and the PII-free `audit_log`;
+* `counts` and `retention_years` so the recipient can verify completeness;
+* `Content-Disposition: attachment` and `Cache-Control: no-store`.
+
+The export itself is audited as `EXPORT_DATA` (counts only). The response **is** personal
+data: store it like any confidential archive, do not paste it into tickets or logs, and
+delete it when the request is closed.
+
 ## Data model
 
 | Table | Purpose | Key constraints |
@@ -522,6 +605,7 @@ Known limitations:
 | `knowledge_sources` | Official publications (MF, ZUS, ISAP) with content hash + version | index on `sha256` |
 | `knowledge_chunks` | Retrieval chunks; embedding is JSON **text** | `UNIQUE(source_id, ordinal)`, FK `ON DELETE CASCADE` |
 | `assistant_answers` | Question/answer pairs with citations and `disclaimer_shown` | — |
+| `audit_log` | Append-only, PII-free action trail: `actor`, `action`, `entity`, `entity_id`, `at`, `meta` | indexes on `at` and `(entity, entity_id)`; `meta` allowlisted by `app.services.audit` |
 | `tax_year_params` | Rates/thresholds/bases as JSON data with an official `source_url` | `UNIQUE(year, version)` |
 
 Money is always `NUMERIC(14, 2)` (`Decimal` in Python) — `tests/test_models.py` asserts it.
@@ -566,6 +650,32 @@ is a hand-reviewed revision; `alembic check` runs the autogenerate comparator an
 that an autogenerate run yields an empty diff on both dialects. Inside it, enum values are
 frozen literals so future Python enum edits cannot silently rewrite history, and the
 cross-dialect types are imported from `app.db.types` so JSONB/TEXT parity is guaranteed.
+`0002` widens the deadline enums and adds the generator's idempotency key; `0003` adds
+`audit_log` (it is revision 0003 because 0002 is already taken).
+
+### Rollback procedure
+
+1. **Stop writers**: put the API behind maintenance mode or stop `uvicorn`; do not run
+   migrations while requests are in flight.
+2. **Back up**: dump the database and archive `DOCUMENTS_DIR` before changing the schema
+   (e.g. `pg_dump "$DATABASE_URL" > backup.sql` or copy `taxwise.db`, plus
+   `tar czf documents-backup.tgz documents/`).
+3. **Inspect**: `alembic current` shows the applied revision; `alembic history` shows the
+   target.
+4. **Roll back one revision** (the normal case):
+   ```bash
+   alembic downgrade -1       # e.g. head 0003 -> 0002, dropping audit_log only
+   alembic current            # verify the expected revision
+   ```
+   To undo a specific migration, pass its revision (`alembic downgrade 0001`). Rolling
+   back across `0002` maps the deadline values back to the legacy ones; rolling back across
+   `0003` **drops `audit_log` and its history**.
+5. **Verify / re-apply**: restart the API, check `/health` and the affected endpoints, then
+   `alembic upgrade head && alembic check` once the fix is deployed. Restore the backup if
+   the downgrade fails or data was already changed.
+
+`tests/test_migrations.py` and `tests/test_audit.py` exercise `upgrade head`,
+`downgrade -1`/`downgrade base` and a second `upgrade head`, so this path is covered by CI.
 
 ## Tests
 
@@ -582,6 +692,16 @@ Coverage highlights:
   `sha256` index exists; `tax_profiles` carries no baked-in rates.
 * `tests/test_migrations.py` — `alembic upgrade head` on a clean SQLite file, `alembic
   check` (no drift), `downgrade base` reversibility, and offline PostgreSQL DDL rendering.
+* `tests/test_retention.py` — the dry run lists expired documents but deletes no rows or
+  files and writes no audit entry; a destructive run without a token, with a wrong token or
+  with the token unconfigured returns `403` and changes nothing; a confirmed run deletes
+  only expired rows/files, leaves newer documents and shared files intact, and writes one
+  PII-free `RETENTION_PURGE` entry; a document exactly at the cutoff is retained.
+* `tests/test_audit.py` — upload, status change and export append audit rows; `meta` and
+  the application log contain no file name, contents, e-mail or PESEL; the metadata
+  validator rejects unknown/nested/PII-shaped values; `GET /api/admin/export-data` returns
+  every stored category with decimal strings and `no-store`; revision `0003` upgrades,
+  downgrades by one and re-applies.
 * `tests/test_health.py` — `GET /health` → 200 `{"status": "ok", ...}`, OpenAPI, settings
   validation.
 * `tests/test_tax_params.py` — 2025/2026 load, invalid files (ZUS total, thresholds,
@@ -710,10 +830,24 @@ alembic upgrade head && python scripts/seed_tax_params.py \
   && curl -s localhost:8000/api/tax-params/2026 && curl -s localhost:8000/health
 ```
 
-Expected: migration applies, the seed script reports created/updated rows, the schema
-script fetches and verifies the FA(3) XSDs (`resources/`, optional), all tests pass,
-linters clean, `/api/tax-params/2026` returns the stored document with `source_url` and
-`effective_from`, and `/health` returns
+Retention/audit acceptance (dry run first; the destructive run needs
+`RETENTION_CONFIRMATION_TOKEN`):
+
+```bash
+pytest -q tests/test_retention.py tests/test_audit.py \
+  && alembic upgrade head && alembic downgrade -1 && alembic upgrade head
+curl -s -X POST 'localhost:8000/api/admin/retention/run?dry_run=true'
+curl -s localhost:8000/api/admin/export-data
+```
+
+Expected: the two test modules pass; revision `0003` applies, is rolled back by exactly
+one revision and re-applies; the dry run returns `deleted: 0` and the candidate list; the
+export returns the JSON document described above with `Cache-Control: no-store`.
+
+Expected for the full command: migration applies, the seed script reports created/updated
+rows, the schema script fetches and verifies the FA(3) XSDs (`resources/`, optional), all
+tests pass, linters clean, `/api/tax-params/2026` returns the stored document with
+`source_url` and `effective_from`, and `/health` returns
 `{"status":"ok","app":"TaxWise SME API","version":"0.1.0","environment":"local"}`.
 
 Invoice imports are covered by `pytest -q tests/test_import.py` (CSV fixtures under

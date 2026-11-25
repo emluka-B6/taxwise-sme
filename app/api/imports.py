@@ -39,6 +39,7 @@ from app.integrations.accounting import (
     build_csv_provider,
     supported_providers,
 )
+from app.services import audit
 
 __all__ = ["MAX_IMPORT_BYTES", "router"]
 
@@ -234,6 +235,18 @@ def import_invoices(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     result = _apply_invoices(session, invoices, csv_provider.row_errors)
+    audit.record(
+        session,
+        action=audit.AuditAction.DOCUMENTS_IMPORTED,
+        entity="import",
+        entity_id=name,
+        meta={
+            "created": result.created,
+            "updated": result.updated,
+            "skipped": result.skipped,
+            "errors": len(result.errors),
+        },
+    )
     session.commit()
     logger.info(
         "invoice import: provider=%s created=%d updated=%d skipped=%d errors=%d",

@@ -63,6 +63,14 @@ class Settings(BaseSettings):
     assistant_rate_limit_per_minute: int = Field(default=20, ge=1, le=10_000)
     assistant_rate_limit_window_seconds: float = Field(default=60.0, gt=0.0)
 
+    # --- retention and audit ----------------------------------------------
+    #: Documents whose ``created_at`` is older than this many years are retention
+    #: candidates; 5 years matches the accounting-record retention rule in Poland.
+    retention_years: int = Field(default=5, ge=1, le=50)
+    #: Required to confirm an irreversible purge (``POST /api/admin/retention/run`` with
+    #: ``dry_run=false``). Read from the environment only; ``None`` disables the purge.
+    retention_confirmation_token: SecretStr | None = None
+
     # --- invoice API imports ----------------------------------------------
     #: Base URL of an accounting platform API. There is deliberately no default:
     #: the ``ApiProvider`` skeleton refuses to run until an operator configures it.

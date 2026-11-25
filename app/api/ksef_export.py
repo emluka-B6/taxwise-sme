@@ -40,6 +40,7 @@ from app.integrations import schemas
 from app.integrations.ksef import fa3_builder, fa3_validate
 from app.integrations.ksef.fa3_builder import Fa3Error, Fa3Invoice
 from app.integrations.schemas import ValidationStatus
+from app.services import audit
 
 __all__ = ["Fa3InvoicePayload", "LineItemPayload", "PartyPayload", "router"]
 
@@ -250,6 +251,18 @@ def export_ksef_xml(
     filename = _filename(payload.number)
     headers = _headers(fmt.version, validation.status)
     headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    audit.record(
+        session,
+        action=audit.AuditAction.EXPORT_FA3,
+        entity="document",
+        entity_id=row.id,
+        meta={
+            "type": row.type.value,
+            "version": fmt.version,
+            "status": validation.status.value,
+        },
+    )
+    session.commit()
     logger.info(
         "FA(3) XML generated locally, not sent to KSeF: document_id=%s bytes=%d validation=%s",
         row.id,

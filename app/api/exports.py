@@ -40,6 +40,7 @@ from app.integrations import schemas
 from app.integrations.jpk import jpk_pit_builder
 from app.integrations.jpk.jpk_pit_builder import JpkPitError, JpkPitRow
 from app.integrations.schemas import SchemaValidation, ValidationStatus, Violation
+from app.services import audit
 
 __all__ = ["router"]
 
@@ -225,6 +226,19 @@ def export_jpk_pit(
 
     headers = _headers(validation.status)
     headers["Content-Disposition"] = f'attachment; filename="jpk_pit_{year}_{month:02d}.xml"'
+    audit.record(
+        session,
+        action=audit.AuditAction.EXPORT_JPK_PIT,
+        entity="export",
+        entity_id=f"jpk-pit:{year:04d}-{month:02d}",
+        meta={
+            "kind": "jpk-pit",
+            "year": year,
+            "month": month,
+            "documents": len(documents),
+        },
+    )
+    session.commit()
     logger.info(
         "JPK_PIT XML generated locally, not submitted to MF: year=%s month=%s rows=%d "
         "bytes=%d validation=%s",
@@ -269,6 +283,20 @@ def export_tax_pack(
 
     headers = _headers(validation.status)
     headers["Content-Disposition"] = f'attachment; filename="tax_pack_{year}.zip"'
+    audit.record(
+        session,
+        action=audit.AuditAction.EXPORT_TAX_PACK,
+        entity="export",
+        entity_id=f"tax-pack:{year:04d}",
+        meta={
+            "kind": "tax-pack",
+            "year": year,
+            "rows": len(rows),
+            "documents": len(documents),
+            "files": len(files),
+        },
+    )
+    session.commit()
     logger.info(
         "Tax pack generated locally, not submitted to MF: year=%s rows=%d files=%s "
         "bytes=%d validation=%s",
