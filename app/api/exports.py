@@ -33,6 +33,7 @@ from fastapi import status as http_status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.export_utils import unprocessable
 from app.db.models import Document
 from app.db.session import get_session
 from app.domain.enums import DocumentType
@@ -91,14 +92,11 @@ def _headers(status: ValidationStatus) -> dict[str, str]:
 def _unprocessable(
     message: str, violations: list[Violation] | tuple[Violation, ...], status: ValidationStatus
 ) -> HTTPException:
-    return HTTPException(
-        status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-        detail={
-            "message": message,
-            "violations": [violation.as_dict() for violation in violations],
-            "submitted_to_mf": False,
-        },
+    return unprocessable(
+        message,
+        violations,
         headers=_headers(status),
+        not_submitted_key="submitted_to_mf",
     )
 
 

@@ -36,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.upload_utils import read_upload
 from app.db.models import Document
 from app.db.session import get_session
 from app.domain.enums import DocumentSource, DocumentStatus, DocumentType
@@ -142,22 +143,6 @@ def detect_format(content: bytes) -> str | None:
     return None
 
 
-def _read_upload(upload: UploadFile) -> bytes:
-    """Read the upload, refusing anything above the size limit before buffering it."""
-    too_large = (
-        f"Files larger than {MAX_DOCUMENT_BYTES // (1024 * 1024)} MB are rejected."
-    )
-    declared = upload.size
-    if declared is not None and declared > MAX_DOCUMENT_BYTES:
-        raise HTTPException(status_code=413, detail=too_large)  # Content Too Large
-    data = upload.file.read(MAX_DOCUMENT_BYTES + 1)
-    if len(data) > MAX_DOCUMENT_BYTES:
-        raise HTTPException(status_code=413, detail=too_large)  # Content Too Large
-    if not data:
-        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
-    return data
-
-
 def _mime_matches(extension: str, declared: str) -> bool:
     """Whether ``declared`` is a plausible MIME type for ``extension``."""
     if declared in CONTENT_TYPES_BY_EXTENSION[extension]:
@@ -239,7 +224,7 @@ def upload_document(
     session: Annotated[Session, Depends(get_session)],
 ) -> DocumentRead:
     """Validate, deduplicate, classify and store one uploaded document."""
-    data = _read_upload(file)
+    data = read_upload(file, max_bytes=MAX_DOCUMENT_BYTES)
     filename, extension = _validate_upload(file, data)
     digest = hashlib.sha256(data).hexdigest()
 

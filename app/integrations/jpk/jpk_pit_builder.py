@@ -35,7 +35,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Final
 from xml.etree import ElementTree as ET
 
@@ -43,8 +43,15 @@ from lxml import etree
 
 from app.db.models import Document
 from app.domain.enums import DocumentType
-from app.integrations.ksef.fa3_builder import is_valid_nip
-from app.integrations.schemas import Violation
+from app.domain.money import money
+from app.domain.nip import is_valid_nip
+from app.integrations.schemas import (
+    ValidationErrorMixin,
+    Violation,
+    ViolationsError,
+    safe_parser,
+)
+from app.integrations.xml_utils import XmlChecker, money_text, parse_date, parse_decimal, stamp
 
 __all__ = [
     "CEL_ZLOZENIA",
@@ -99,9 +106,7 @@ SYSTEM_INFO: Final[str] = (
     "TaxWise SME - plik wygenerowany lokalnie, NIE został przesłany do systemu MF"
 )
 
-_CENT: Final[Decimal] = Decimal("0.01")
 _ZERO: Final[Decimal] = Decimal("0.00")
-_STAMP_FORMAT: Final[str] = "%Y-%m-%dT%H:%M:%SZ"
 
 #: Amounts are written with a dot and at most two fraction digits (no exponent notation).
 _AMOUNT_RE: Final[re.Pattern[str]] = re.compile(r"-?\d+(?:\.\d{1,2})?")
@@ -110,46 +115,18 @@ _AMOUNT_RE: Final[re.Pattern[str]] = re.compile(r"-?\d+(?:\.\d{1,2})?")
 _CEL_VALUES: Final[frozenset[str]] = frozenset({"1", "2"})
 
 
-class JpkPitError(ValueError):
+class JpkPitError(ViolationsError):
     """Base class for JPK_PIT generation problems; carries the violations found."""
 
-    violations: tuple[Violation, ...] = ()
 
-    def as_dict(self) -> dict[str, object]:
-        """JSON-ready error payload (``message`` + ``violations``)."""
-        return {
-            "message": str(self),
-            "violations": [violation.as_dict() for violation in self.violations],
-        }
-
-
-class JpkPitValidationError(JpkPitError):
+class JpkPitValidationError(ValidationErrorMixin, JpkPitError):
     """Input documents are missing data or are inconsistent; ``violations`` lists them."""
 
-    def __init__(self, violations: Sequence[Violation], message: str | None = None) -> None:
-        self.violations = tuple(violations)
-        detail = "; ".join(f"{item.path}: {item.message}" for item in self.violations)
-        super().__init__(message or f"JPK_PIT data is not valid: {detail}")
+    label = "JPK_PIT data"
 
 
 class JpkPitTotalsMismatch(JpkPitValidationError):
     """A document's net + VAT does not add up to its stored gross amount."""
-
-
-def _money(value: Decimal) -> Decimal:
-    """Round to grosze with ``ROUND_HALF_UP`` (the convention used by the calc engine)."""
-    return value.quantize(_CENT, rounding=ROUND_HALF_UP)
-
-
-def _money_text(value: Decimal) -> str:
-    return f"{_money(value):.2f}"
-
-
-def _stamp(value: datetime) -> str:
-    """``DataWytworzenia``: UTC, second precision, trailing ``Z`` (``xs:dateTime``)."""
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=UTC)
-    return value.astimezone(UTC).replace(microsecond=0).strftime(_STAMP_FORMAT)
 
 
 def period_bounds(year: int, month: int | None) -> tuple[date, date]:
@@ -196,7 +173,91 @@ class JpkPitSummary:
     @property
     def saldo_brutto(self) -> Decimal:
         """Revenue gross minus cost gross (the statement's gross balance)."""
-        return _money(self.przychody_brutto - self.koszty_brutto)
+        return money(self.przychody_brutto - self.koszty_brutto)
+
+
+def _document_row(document: Document) -> tuple[JpkPitRow | None, list[Violation], bool]:
+    """Map one document to a JPK_PIT row; returns (row | None, findings, totals_mismatch).
+
+    A ``None`` row means the document cannot be represented (unsupported type, or a
+    missing net/VAT/gross amount); its findings are still reported.
+    """
+    where = f"document[{document.id}]" if document.id is not None else "document"
+    violations: list[Violation] = []
+
+    typ = ROW_TYPES.get(document.type)
+    if typ is None:
+        violations.append(
+            Violation(
+                f"{where}/type",
+                "JPK_PIT accepts only VAT_INVOICE_SALES and VAT_INVOICE_COST, "
+                f"got {document.type}",
+            )
+        )
+        return None, violations, False
+
+    if (document.currency or "").upper() != "PLN":
+        violations.append(
+            Violation(
+                f"{where}/currency",
+                f"JPK_PIT amounts are reported in PLN, got {document.currency!r}",
+            )
+        )
+
+    netto = document.amount_net
+    vat = document.vat_amount
+    brutto = document.amount_gross
+    for label, value in (
+        ("amount_net", netto),
+        ("vat_amount", vat),
+        ("amount_gross", brutto),
+    ):
+        if value is None:
+            violations.append(
+                Violation(
+                    f"{where}/{label}",
+                    f"the document has no {label}; the JPK_PIT row cannot be built",
+                )
+            )
+    if netto is None or vat is None or brutto is None:
+        return None, violations, False
+
+    totals_mismatch = False
+    if money(netto + vat) != money(brutto):
+        totals_mismatch = True
+        violations.append(
+            Violation(
+                f"{where}/amount_gross",
+                f"document gross is {money_text(brutto)} but net + VAT is "
+                f"{money_text(money(netto + vat))}",
+            )
+        )
+
+    nip = (document.counterparty_nip or "").strip()
+    if not nip:
+        violations.append(
+            Violation(
+                f"{where}/counterparty_nip",
+                "a JPK_PIT row requires the counterparty NIP",
+            )
+        )
+    elif not is_valid_nip(nip):
+        violations.append(
+            Violation(
+                f"{where}/counterparty_nip",
+                f"{nip!r} is not a checksum-valid Polish NIP",
+            )
+        )
+
+    row = JpkPitRow(
+        typ=typ,
+        data=document.issue_date,
+        netto=money(netto),
+        vat=money(vat),
+        brutto=money(brutto),
+        nip_kontrahenta=nip,
+    )
+    return row, violations, totals_mismatch
 
 
 def collect_rows(documents: Sequence[Document]) -> tuple[JpkPitRow, ...]:
@@ -212,79 +273,11 @@ def collect_rows(documents: Sequence[Document]) -> tuple[JpkPitRow, ...]:
     totals_mismatch = False
 
     for document in sorted(documents, key=lambda item: (item.issue_date, item.id or 0)):
-        where = f"document[{document.id}]" if document.id is not None else "document"
-        typ = ROW_TYPES.get(document.type)
-        if typ is None:
-            violations.append(
-                Violation(
-                    f"{where}/type",
-                    "JPK_PIT accepts only VAT_INVOICE_SALES and VAT_INVOICE_COST, "
-                    f"got {document.type}",
-                )
-            )
-            continue
-        if (document.currency or "").upper() != "PLN":
-            violations.append(
-                Violation(
-                    f"{where}/currency",
-                    f"JPK_PIT amounts are reported in PLN, got {document.currency!r}",
-                )
-            )
-
-        netto = document.amount_net
-        vat = document.vat_amount
-        brutto = document.amount_gross
-        for label, value in (
-            ("amount_net", netto),
-            ("vat_amount", vat),
-            ("amount_gross", brutto),
-        ):
-            if value is None:
-                violations.append(
-                    Violation(
-                        f"{where}/{label}",
-                        f"the document has no {label}; the JPK_PIT row cannot be built",
-                    )
-                )
-        if netto is None or vat is None or brutto is None:
-            continue
-
-        if _money(netto + vat) != _money(brutto):
-            totals_mismatch = True
-            violations.append(
-                Violation(
-                    f"{where}/amount_gross",
-                    f"document gross is {_money_text(brutto)} but net + VAT is "
-                    f"{_money_text(_money(netto + vat))}",
-                )
-            )
-
-        nip = (document.counterparty_nip or "").strip()
-        if not nip:
-            violations.append(
-                Violation(
-                    f"{where}/counterparty_nip",
-                    "a JPK_PIT row requires the counterparty NIP",
-                )
-            )
-        elif not is_valid_nip(nip):
-            violations.append(
-                Violation(
-                    f"{where}/counterparty_nip",
-                    f"{nip!r} is not a checksum-valid Polish NIP",
-                )
-            )
-
-        rows.append(
-            JpkPitRow(
-                typ=typ,
-                data=document.issue_date,
-                netto=_money(netto),
-                vat=_money(vat),
-                brutto=_money(brutto),
-                nip_kontrahenta=nip,
-            )
-        )
+        row, findings, mismatch = _document_row(document)
+        violations.extend(findings)
+        totals_mismatch = totals_mismatch or mismatch
+        if row is not None:
+            rows.append(row)
 
     if violations:
         error = JpkPitTotalsMismatch if totals_mismatch else JpkPitValidationError
@@ -298,7 +291,7 @@ def summarize(rows: Sequence[JpkPitRow]) -> JpkPitSummary:
     cost = [row for row in rows if row.typ == TYP_KOSZT]
 
     def total(items: Sequence[JpkPitRow], attribute: str) -> Decimal:
-        return _money(sum((getattr(row, attribute) for row in items), _ZERO))
+        return money(sum((getattr(row, attribute) for row in items), _ZERO))
 
     return JpkPitSummary(
         liczba_przychodow=len(revenue),
@@ -355,7 +348,7 @@ def _render(
     _add(header, "DataOd", data_od.isoformat())
     _add(header, "DataDo", data_do.isoformat())
     _add(header, "CelZlozenia", CEL_ZLOZENIA)
-    _add(header, "DataWytworzenia", _stamp(created_at))
+    _add(header, "DataWytworzenia", stamp(created_at))
     _add(header, "SystemInfo", SYSTEM_INFO)
 
     positions = _add(root, "Pozycje")
@@ -363,21 +356,21 @@ def _render(
         position = _add(positions, "Pozycja")
         _add(position, "Typ", row.typ)
         _add(position, "Data", row.data.isoformat())
-        _add(position, "KwotaNetto", _money_text(row.netto))
-        _add(position, "KwotaVat", _money_text(row.vat))
-        _add(position, "KwotaBrutto", _money_text(row.brutto))
+        _add(position, "KwotaNetto", money_text(row.netto))
+        _add(position, "KwotaVat", money_text(row.vat))
+        _add(position, "KwotaBrutto", money_text(row.brutto))
         _add(position, "NipKontrahenta", row.nip_kontrahenta)
 
     totals = _add(root, "Podsumowanie")
     _add(totals, "LiczbaPrzychodow", str(summary.liczba_przychodow))
     _add(totals, "LiczbaKosztow", str(summary.liczba_kosztow))
-    _add(totals, "SumaPrzychodowNetto", _money_text(summary.przychody_netto))
-    _add(totals, "SumaPrzychodowVat", _money_text(summary.przychody_vat))
-    _add(totals, "SumaPrzychodowBrutto", _money_text(summary.przychody_brutto))
-    _add(totals, "SumaKosztowNetto", _money_text(summary.koszty_netto))
-    _add(totals, "SumaKosztowVat", _money_text(summary.koszty_vat))
-    _add(totals, "SumaKosztowBrutto", _money_text(summary.koszty_brutto))
-    _add(totals, "SaldoBrutto", _money_text(summary.saldo_brutto))
+    _add(totals, "SumaPrzychodowNetto", money_text(summary.przychody_netto))
+    _add(totals, "SumaPrzychodowVat", money_text(summary.przychody_vat))
+    _add(totals, "SumaPrzychodowBrutto", money_text(summary.przychody_brutto))
+    _add(totals, "SumaKosztowNetto", money_text(summary.koszty_netto))
+    _add(totals, "SumaKosztowVat", money_text(summary.koszty_vat))
+    _add(totals, "SumaKosztowBrutto", money_text(summary.koszty_brutto))
+    _add(totals, "SaldoBrutto", money_text(summary.saldo_brutto))
 
     ET.indent(root, space="  ")
     return (
@@ -409,59 +402,17 @@ def build(
     )
 
 
-def _parse_decimal(text: str | None) -> Decimal | None:
-    """Parse a plain decimal with at most two fraction digits; reject exponent notation."""
-    if text is None:
-        return None
-    stripped = text.strip()
-    if not _AMOUNT_RE.fullmatch(stripped):
-        return None
-    try:
-        value = Decimal(stripped)
-    except InvalidOperation:  # pragma: no cover - the regex already excludes invalid input
-        return None
-    return value if value.is_finite() else None
-
-
-def _parse_date(text: str | None) -> date | None:
-    if text is None:
-        return None
-    try:
-        return date.fromisoformat(text.strip())
-    except ValueError:
-        return None
-
-
-class _Checker:
+class _Checker(XmlChecker):
     """Walks one JPK_PIT document and accumulates :class:`Violation` objects."""
 
     def __init__(self) -> None:
-        self.violations: list[Violation] = []
-
-    def add(self, path: str, message: str) -> None:
-        self.violations.append(Violation(path=path, message=message))
-
-    def find(self, parent: etree._Element, name: str) -> etree._Element | None:
-        return parent.find(_q(name))
-
-    def text(self, parent: etree._Element, name: str) -> str | None:
-        element = self.find(parent, name)
-        if element is None or element.text is None:
-            return None
-        return str(element.text).strip()
-
-    def require(self, parent: etree._Element, name: str, path: str) -> str | None:
-        value = self.text(parent, name)
-        if not value:
-            self.add(f"{path}/{name}", "required element is missing or empty")
-            return None
-        return value
+        super().__init__(NAMESPACE)
 
     def decimal(self, parent: etree._Element, name: str, path: str) -> Decimal | None:
         value = self.require(parent, name, path)
         if value is None:
             return None
-        parsed = _parse_decimal(value)
+        parsed = parse_decimal(value, pattern=_AMOUNT_RE)
         if parsed is None:
             self.add(
                 f"{path}/{name}",
@@ -509,10 +460,10 @@ class _Checker:
         if wariant is not None and wariant <= 0:
             self.add("Naglowek/WariantFormularza", "wariant must be a positive integer")
 
-        data_od = _parse_date(self.require(header, "DataOd", "Naglowek"))
+        data_od = parse_date(self.require(header, "DataOd", "Naglowek"))
         if self.text(header, "DataOd") is not None and data_od is None:
             self.add("Naglowek/DataOd", "DataOd is not an ISO-8601 date")
-        data_do = _parse_date(self.require(header, "DataDo", "Naglowek"))
+        data_do = parse_date(self.require(header, "DataDo", "Naglowek"))
         if self.text(header, "DataDo") is not None and data_do is None:
             self.add("Naglowek/DataDo", "DataDo is not an ISO-8601 date")
         if data_od is not None and data_do is not None and data_od > data_do:
@@ -542,7 +493,7 @@ class _Checker:
                 typ = None
 
             data_text = self.require(position, "Data", path)
-            data = _parse_date(data_text)
+            data = parse_date(data_text)
             if data_text is not None and data is None:
                 self.add(f"{path}/Data", f"{data_text!r} is not an ISO-8601 date")
 
@@ -553,12 +504,12 @@ class _Checker:
                 netto is not None
                 and vat is not None
                 and brutto is not None
-                and _money(netto + vat) != _money(brutto)
+                and money(netto + vat) != money(brutto)
             ):
                 self.add(
                     f"{path}/KwotaBrutto",
-                    f"{_money_text(brutto)} does not equal net + VAT "
-                    f"({_money_text(_money(netto + vat))})",
+                    f"{money_text(brutto)} does not equal net + VAT "
+                    f"({money_text(money(netto + vat))})",
                 )
 
             nip = self.require(position, "NipKontrahenta", path)
@@ -589,10 +540,10 @@ class _Checker:
         self, block: etree._Element, name: str, expected: Decimal, source: str
     ) -> None:
         actual = self.decimal(block, name, "Podsumowanie")
-        if actual is not None and _money(actual) != _money(expected):
+        if actual is not None and money(actual) != money(expected):
             self.add(
                 f"Podsumowanie/{name}",
-                f"{_money_text(actual)} does not match {source} ({_money_text(expected)})",
+                f"{money_text(actual)} does not match {source} ({money_text(expected)})",
             )
 
     def _match_count(self, block: etree._Element, name: str, expected: int, source: str) -> None:
@@ -653,7 +604,7 @@ def validate_jpk_pit(
     compared with the aggregates of those source documents, so a statement can never
     silently disagree with the rows it was generated from.
     """
-    parser = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False)
+    parser = safe_parser()
     try:
         root = etree.fromstring(xml_bytes, parser=parser)
     except etree.XMLSyntaxError as exc:

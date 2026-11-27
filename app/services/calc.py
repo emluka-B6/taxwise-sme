@@ -15,13 +15,13 @@ formula without the eligibility flag raises :class:`IncompatibleRegimeError`.
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Final
 
 from app.domain.enums import VatStatus, ZusVariant
+from app.domain.money import coerce_decimal, money
 from app.services.tax_params import TaxParams, ZusComponent
 
 __all__ = [
@@ -38,8 +38,6 @@ __all__ = [
     "zus_contributions",
 ]
 
-#: Monetary precision: one grosz.
-_CENT: Final[Decimal] = Decimal("0.01")
 _ZERO: Final[Decimal] = Decimal("0.00")
 _ZERO_EXACT: Final[Decimal] = Decimal("0")
 _MIN_MONTH: Final[int] = 1
@@ -83,31 +81,12 @@ type VatEntry = VatLine | Mapping[str, object] | Sequence[object]
 
 def _decimal(value: object, field: str) -> Decimal:
     """Convert ``value`` to a finite ``Decimal`` without changing its scale."""
-    if isinstance(value, bool) or value is None:
-        raise CalcInputError(f"{field} must be a decimal number, got {value!r}")
-    if isinstance(value, Decimal):
-        result = value
-    elif isinstance(value, int):
-        result = Decimal(value)
-    elif isinstance(value, str):
-        try:
-            result = Decimal(value)
-        except InvalidOperation as exc:
-            raise CalcInputError(f"{field} is not a valid decimal number: {value!r}") from exc
-    elif isinstance(value, float):
-        if not math.isfinite(value):
-            raise CalcInputError(f"{field} must be finite, got {value!r}")
-        result = Decimal(str(value))
-    else:
-        raise CalcInputError(f"{field} must be a decimal number, got {type(value).__name__}")
-    if not result.is_finite():
-        raise CalcInputError(f"{field} must be finite, got {value!r}")
-    return result
+    return coerce_decimal(value, field, error=CalcInputError)
 
 
 def _money(value: object, field: str) -> Decimal:
     """Convert ``value`` to PLN rounded to grosze (``ROUND_HALF_UP``)."""
-    return _decimal(value, field).quantize(_CENT, ROUND_HALF_UP)
+    return money(coerce_decimal(value, field, error=CalcInputError))
 
 
 def _non_negative_money(value: object, field: str) -> Decimal:
@@ -131,7 +110,7 @@ def _rate(value: object, field: str, *, allowed: Sequence[Decimal] | None = None
 
 def _round(value: Decimal) -> Decimal:
     """Round a monetary value to grosze with ``ROUND_HALF_UP``."""
-    return value.quantize(_CENT, ROUND_HALF_UP)
+    return money(value)
 
 
 def pit_scale(income: object, params: TaxParams) -> Decimal:

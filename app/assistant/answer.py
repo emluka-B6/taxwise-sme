@@ -289,6 +289,43 @@ def _answerer_name(answerer: Answerer) -> str:
     return name if isinstance(name, str) and name else type(answerer).__name__
 
 
+def _reply_for(
+    question: str,
+    context: Sequence[RetrievedChunk],
+    resolved: Settings,
+    answerer: Answerer | None,
+) -> AssistantReply:
+    """Build the reply: refuse when nothing was retrieved, otherwise use the provider."""
+    if not context:
+        # No generation: a question without coverage must not reach an LLM.
+        model = _answerer_name(answerer) if answerer is not None else resolved.assistant_llm
+        return AssistantReply(
+            answer=INSUFFICIENT_SOURCES_ANSWER,
+            citations=(),
+            model=model.strip() or "stub",
+            disclaimer=DISCLAIMER,
+            refused=True,
+        )
+
+    provider = answerer or build_answerer(resolved)
+    raw = provider.answer(question, context)
+    if _is_refusal(raw.answer):
+        return AssistantReply(
+            answer=INSUFFICIENT_SOURCES_ANSWER,
+            citations=(),
+            model=raw.model or provider.name,
+            disclaimer=DISCLAIMER,
+            refused=True,
+        )
+    return AssistantReply(
+        answer=raw.answer,
+        citations=_citations_for(raw.answer, context),
+        model=raw.model or provider.name,
+        disclaimer=DISCLAIMER,
+        refused=False,
+    )
+
+
 def ask(
     session: Session,
     question: str,
@@ -317,36 +354,7 @@ def ask(
         top_k=top_k,
     )
 
-    if not context:
-        # No generation: a question without coverage must not reach an LLM.
-        model = _answerer_name(answerer) if answerer is not None else resolved.assistant_llm
-        reply = AssistantReply(
-            answer=INSUFFICIENT_SOURCES_ANSWER,
-            citations=(),
-            model=model.strip() or "stub",
-            disclaimer=DISCLAIMER,
-            refused=True,
-        )
-    else:
-        provider = answerer or build_answerer(resolved)
-        raw = provider.answer(cleaned, context)
-        if _is_refusal(raw.answer):
-            reply = AssistantReply(
-                answer=INSUFFICIENT_SOURCES_ANSWER,
-                citations=(),
-                model=raw.model or provider.name,
-                disclaimer=DISCLAIMER,
-                refused=True,
-            )
-        else:
-            citations = _citations_for(raw.answer, context)
-            reply = AssistantReply(
-                answer=raw.answer,
-                citations=citations,
-                model=raw.model or provider.name,
-                disclaimer=DISCLAIMER,
-                refused=False,
-            )
+    reply = _reply_for(cleaned, context, resolved, answerer)
 
     row = AssistantAnswer(
         question=cleaned,

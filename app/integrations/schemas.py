@@ -20,6 +20,7 @@ imported XSDs are resolved by file name from the schema's own directory (see
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import lru_cache
@@ -40,13 +41,16 @@ __all__ = [
     "SchemaImport",
     "SchemaSpec",
     "SchemaValidation",
+    "ValidationErrorMixin",
     "ValidationStatus",
     "Violation",
+    "ViolationsError",
     "check",
     "clear_cache",
     "fa3_format",
     "get",
     "load_config",
+    "safe_parser",
     "validate",
 ]
 
@@ -126,6 +130,47 @@ class Violation:
     def as_dict(self) -> dict[str, str]:
         """JSON-ready representation used in the ``422`` payload."""
         return {"path": self.path, "message": self.message}
+
+
+class ViolationsError(ValueError):
+    """``ValueError`` that can carry validation findings and renders them as JSON.
+
+    Subclasses raised with a plain message (no findings) simply fall back to the empty
+    ``violations`` tuple, so a catch-all ``except ViolationsError`` keeps working.
+    """
+
+    violations: tuple[Violation, ...] = ()
+
+    def as_dict(self) -> dict[str, object]:
+        """JSON-ready error payload (``message`` + ``violations``)."""
+        return {
+            "message": str(self),
+            "violations": [violation.as_dict() for violation in self.violations],
+        }
+
+
+def _format_violations(violations: Sequence[Violation], label: str) -> str:
+    """Default message for an error constructed from a list of findings."""
+    detail = "; ".join(f"{item.path}: {item.message}" for item in violations)
+    return f"{label} is not valid: {detail}"
+
+
+class ValidationErrorMixin:
+    """``__init__`` for errors constructed from a list of :class:`Violation` findings.
+
+    The default message is derived from the findings and the subclass ``label``; a
+    caller-supplied ``message`` wins. Combine it with a ``ViolationsError`` subclass::
+
+        class Fa3ValidationError(ValidationErrorMixin, Fa3Error):
+            label = "FA(3) invoice data"
+    """
+
+    label: str = "data"
+    violations: tuple[Violation, ...] = ()
+
+    def __init__(self, violations: Sequence[Violation], message: str | None = None) -> None:
+        self.violations = tuple(violations)
+        super().__init__(message or _format_violations(self.violations, self.label))  # type: ignore[call-arg]
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,8 +436,8 @@ def _schema(schema_path: Path) -> etree.XMLSchema:
     return _compile(str(schema_path), schema_path.stat().st_mtime)
 
 
-def _parser() -> etree.XMLParser:
-    """Parser for the *document*: no entity expansion, no network, no DTD loading."""
+def safe_parser() -> etree.XMLParser:
+    """Parser for *documents*: no entity expansion, no network, no DTD loading."""
     return etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False)
 
 
@@ -409,7 +454,7 @@ def validate(xml_bytes: bytes, schema_path: Path | str | None) -> list[Violation
         return []
     schema = _schema(path)
     try:
-        document = etree.fromstring(xml_bytes, parser=_parser())
+        document = etree.fromstring(xml_bytes, parser=safe_parser())
     except etree.XMLSyntaxError as exc:
         return [Violation(path="document", message=f"not well-formed XML: {exc}")]
     if schema.validate(document):

@@ -18,19 +18,21 @@ signing and upload by an authorised tool.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from enum import StrEnum
+from decimal import Decimal
 from pathlib import Path
 from typing import Final
 from xml.etree import ElementTree as ET
 
 from app.db.models import Document
 from app.domain.enums import DocumentType
+from app.domain.money import coerce_decimal, money
+from app.domain.nip import NIP_INPUT_RE, is_valid_nip
 from app.integrations import schemas
-from app.integrations.schemas import Violation
+from app.integrations.ksef.format import RATE_SLOTS, RateSlot, VatRate
+from app.integrations.schemas import ValidationErrorMixin, Violation, ViolationsError
+from app.integrations.xml_utils import money_text, stamp
 
 __all__ = [
     "RATE_SLOTS",
@@ -54,119 +56,24 @@ SYSTEM_INFO: Final[str] = (
     "TaxWise SME - plik wygenerowany lokalnie, NIE został przesłany do KSeF"
 )
 
-_CENT: Final[Decimal] = Decimal("0.01")
 _ZERO: Final[Decimal] = Decimal("0.00")
-_STAMP_FORMAT: Final[str] = "%Y-%m-%dT%H:%M:%SZ"
 
-#: NIP checksum weights (the tenth digit is the control digit).
-_NIP_WEIGHTS: Final[tuple[int, ...]] = (6, 5, 7, 2, 3, 4, 5, 6, 7)
-_NIP_INPUT_RE: Final[re.Pattern[str]] = re.compile(r"\D")
 _COUNTRY_RE: Final[re.Pattern[str]] = re.compile(r"[A-Z]{2}")
 _CURRENCY_RE: Final[re.Pattern[str]] = re.compile(r"[A-Z]{3}")
 
 
-class Fa3Error(ValueError):
+class Fa3Error(ViolationsError):
     """Base class for FA(3) generation problems; carries the violations found."""
 
-    violations: tuple[Violation, ...] = ()
 
-    def as_dict(self) -> dict[str, object]:
-        """JSON-ready error payload (``message`` + ``violations``)."""
-        return {
-            "message": str(self),
-            "violations": [violation.as_dict() for violation in self.violations],
-        }
-
-
-class Fa3ValidationError(Fa3Error):
+class Fa3ValidationError(ValidationErrorMixin, Fa3Error):
     """Input data is missing or inconsistent; ``violations`` lists every finding."""
 
-    def __init__(self, violations: Sequence[Violation], message: str | None = None) -> None:
-        self.violations = tuple(violations)
-        detail = "; ".join(f"{item.path}: {item.message}" for item in self.violations)
-        super().__init__(message or f"FA(3) invoice data is not valid: {detail}")
+    label = "FA(3) invoice data"
 
 
 class Fa3TotalsMismatch(Fa3ValidationError):
     """The line items do not add up to the net/VAT/gross amounts stored on the document."""
-
-
-def is_valid_nip(value: str) -> bool:
-    """Whether ``value`` (digits, separators allowed) is a checksum-valid Polish NIP."""
-    digits = _NIP_INPUT_RE.sub("", value)
-    if len(digits) != 10 or not digits.isdigit():
-        return False
-    checksum = sum(
-        weight * int(digit) for weight, digit in zip(_NIP_WEIGHTS, digits[:9], strict=True)
-    )
-    control = checksum % 11
-    return control != 10 and control == int(digits[9])
-
-
-class VatRate(StrEnum):
-    """FA(3) ``P_12`` codes supported by this builder (23/8/5/0 percent and exemption)."""
-
-    R23 = "23"
-    R8 = "8"
-    R5 = "5"
-    R0 = "0"
-    ZW = "zw"
-
-    @property
-    def percent(self) -> Decimal | None:
-        """The rate as a percentage, or ``None`` for the exempt (``zw``) code."""
-        return None if self is VatRate.ZW else Decimal(self.value)
-
-
-@dataclass(frozen=True, slots=True)
-class RateSlot:
-    """Where a rate's summary belongs in ``Fa`` (``P_13_x`` / ``P_14_x`` / ``P_12``)."""
-
-    p12: str
-    net_element: str
-    vat_element: str | None
-
-
-#: The FA(3) mapping of the supported rates. ``P_12`` is a code, not a fraction: the
-#: zero-rate code is the domestic one (``0 KR``) and exemption carries no VAT element.
-RATE_SLOTS: Final[Mapping[VatRate, RateSlot]] = {
-    VatRate.R23: RateSlot("23", "P_13_1", "P_14_1"),
-    VatRate.R8: RateSlot("8", "P_13_2", "P_14_2"),
-    VatRate.R5: RateSlot("5", "P_13_3", "P_14_3"),
-    VatRate.R0: RateSlot("0 KR", "P_13_4", "P_14_4"),
-    VatRate.ZW: RateSlot("zw", "P_13_7", None),
-}
-
-
-def _decimal(value: object, field: str) -> Decimal:
-    """Convert ``value`` to a finite ``Decimal``; floats go through their string form."""
-    if isinstance(value, bool) or value is None:
-        raise Fa3Error(f"{field} must be a decimal number, got {value!r}")
-    if isinstance(value, Decimal):
-        result = value
-    elif isinstance(value, int):
-        result = Decimal(value)
-    elif isinstance(value, float):
-        result = Decimal(str(value))
-    elif isinstance(value, str):
-        try:
-            result = Decimal(value.strip())
-        except InvalidOperation as exc:
-            raise Fa3Error(f"{field} is not a decimal number: {value!r}") from exc
-    else:
-        raise Fa3Error(f"{field} must be a decimal number, got {value!r}")
-    if not result.is_finite():
-        raise Fa3Error(f"{field} must be a finite decimal number, got {value!r}")
-    return result
-
-
-def _money(value: Decimal) -> Decimal:
-    """Round to grosze with ``ROUND_HALF_UP`` (the convention used by the calc engine)."""
-    return value.quantize(_CENT, rounding=ROUND_HALF_UP)
-
-
-def _money_text(value: Decimal) -> str:
-    return f"{_money(value):.2f}"
 
 
 def _text(value: object, field: str) -> str:
@@ -187,7 +94,7 @@ def _coerce_rate(value: object) -> VatRate:
             if normalised == rate.value:
                 return rate
         raise Fa3Error(f"unsupported VAT rate {value!r}; use 23, 8, 5, 0 or zw")
-    fraction = _decimal(value, "vat rate")
+    fraction = coerce_decimal(value, "vat rate", error=Fa3Error)
     percent = fraction * 100 if fraction <= 1 else fraction
     for rate in VatRate:
         if rate is not VatRate.ZW and percent == Decimal(rate.value):
@@ -212,7 +119,7 @@ class Party:
     gv: str = "2"
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "nip", _NIP_INPUT_RE.sub("", self.nip))
+        object.__setattr__(self, "nip", NIP_INPUT_RE.sub("", self.nip))
         object.__setattr__(self, "country_code", self.country_code.strip().upper())
         object.__setattr__(self, "jst", str(self.jst).strip())
         object.__setattr__(self, "gv", str(self.gv).strip())
@@ -234,8 +141,14 @@ class LineItem:
     vat_rate: VatRate | str | Decimal
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "quantity", _decimal(self.quantity, "line quantity"))
-        object.__setattr__(self, "unit_net_price", _decimal(self.unit_net_price, "unit net price"))
+        object.__setattr__(
+            self, "quantity", coerce_decimal(self.quantity, "line quantity", error=Fa3Error)
+        )
+        object.__setattr__(
+            self,
+            "unit_net_price",
+            coerce_decimal(self.unit_net_price, "unit net price", error=Fa3Error),
+        )
         object.__setattr__(self, "vat_rate", _coerce_rate(self.vat_rate))
 
     @property
@@ -246,7 +159,7 @@ class LineItem:
     @property
     def net(self) -> Decimal:
         """Line net value: ``quantity * unit_net_price`` rounded to grosze."""
-        return _money(self.quantity * self.unit_net_price)
+        return money(self.quantity * self.unit_net_price)
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,16 +219,16 @@ class Fa3Invoice:
         for rate in VatRate:
             if rate not in nets:
                 continue
-            net = _money(nets[rate])
+            net = money(nets[rate])
             percent = rate.percent
-            vat = _ZERO if percent is None else _money(net * percent / 100)
+            vat = _ZERO if percent is None else money(net * percent / 100)
             by_rate.append(RateTotal(rate=rate, net=net, vat=vat))
-        net_total = _money(sum((total.net for total in by_rate), _ZERO))
-        vat_total = _money(sum((total.vat for total in by_rate), _ZERO))
+        net_total = money(sum((total.net for total in by_rate), _ZERO))
+        vat_total = money(sum((total.vat for total in by_rate), _ZERO))
         return Fa3Totals(
             net=net_total,
             vat=vat_total,
-            gross=_money(net_total + vat_total),
+            gross=money(net_total + vat_total),
             by_rate=tuple(by_rate),
         )
 
@@ -368,16 +281,54 @@ def _total_findings(
     for path, label, expected, computed, elements in pairs:
         if expected is None:
             continue
-        if _money(expected) != computed:
+        if money(expected) != computed:
             mismatched = True
             violations.append(
                 Violation(
                     path,
-                    f"document {label} is {_money_text(expected)} but the lines add up to "
-                    f"{_money_text(computed)} ({elements})",
+                    f"document {label} is {money_text(expected)} but the lines add up to "
+                    f"{money_text(computed)} ({elements})",
                 )
             )
     return mismatched
+
+
+def _check_currency(
+    document: Document, invoice: Fa3Invoice, violations: list[Violation]
+) -> None:
+    if not isinstance(invoice.currency, str) or not _CURRENCY_RE.fullmatch(invoice.currency):
+        violations.append(Violation("Fa/KodWaluty", "currency must be a three-letter code"))
+    if not document.currency:
+        violations.append(Violation("document/currency", "the document has no currency"))
+    elif invoice.currency != document.currency.upper():
+        violations.append(
+            Violation(
+                "Fa/KodWaluty",
+                f"invoice currency {invoice.currency!r} does not match the document "
+                f"currency {document.currency!r}",
+            )
+        )
+
+
+def _check_lines(invoice: Fa3Invoice, violations: list[Violation]) -> None:
+    if not invoice.lines:
+        violations.append(Violation("Fa/FaWiersz", "at least one line item is required"))
+    elif len(invoice.lines) > 10_000:
+        violations.append(Violation("Fa/FaWiersz", "at most 10000 line items are allowed"))
+    for index, item in enumerate(invoice.lines, start=1):
+        where = f"Fa/FaWiersz[{index}]"
+        if not isinstance(item.description, str) or not item.description.strip():
+            violations.append(Violation(f"{where}/P_7", "description is required"))
+        elif len(item.description.strip()) > 512:
+            violations.append(
+                Violation(f"{where}/P_7", "description must not exceed 512 characters")
+            )
+        if item.quantity <= _ZERO:
+            violations.append(Violation(f"{where}/P_8B", "quantity must be greater than zero"))
+        if not isinstance(item.unit, str) or not item.unit.strip():
+            violations.append(Violation(f"{where}/P_8A", "unit of measure is required"))
+        if item.unit_net_price < _ZERO:
+            violations.append(Violation(f"{where}/P_9A", "unit net price must not be negative"))
 
 
 def _collect(
@@ -393,18 +344,7 @@ def _collect(
                 f"got {document.type}",
             )
         )
-    if not isinstance(invoice.currency, str) or not _CURRENCY_RE.fullmatch(invoice.currency):
-        violations.append(Violation("Fa/KodWaluty", "currency must be a three-letter code"))
-    if not document.currency:
-        violations.append(Violation("document/currency", "the document has no currency"))
-    elif invoice.currency != document.currency.upper():
-        violations.append(
-            Violation(
-                "Fa/KodWaluty",
-                f"invoice currency {invoice.currency!r} does not match the document "
-                f"currency {document.currency!r}",
-            )
-        )
+    _check_currency(document, invoice, violations)
 
     number = invoice.number if isinstance(invoice.number, str) else ""
     if not number.strip():
@@ -429,24 +369,7 @@ def _collect(
             )
         )
 
-    if not invoice.lines:
-        violations.append(Violation("Fa/FaWiersz", "at least one line item is required"))
-    elif len(invoice.lines) > 10_000:
-        violations.append(Violation("Fa/FaWiersz", "at most 10000 line items are allowed"))
-    for index, item in enumerate(invoice.lines, start=1):
-        where = f"Fa/FaWiersz[{index}]"
-        if not isinstance(item.description, str) or not item.description.strip():
-            violations.append(Violation(f"{where}/P_7", "description is required"))
-        elif len(item.description.strip()) > 512:
-            violations.append(
-                Violation(f"{where}/P_7", "description must not exceed 512 characters")
-            )
-        if item.quantity <= _ZERO:
-            violations.append(Violation(f"{where}/P_8B", "quantity must be greater than zero"))
-        if not isinstance(item.unit, str) or not item.unit.strip():
-            violations.append(Violation(f"{where}/P_8A", "unit of measure is required"))
-        if item.unit_net_price < _ZERO:
-            violations.append(Violation(f"{where}/P_9A", "unit net price must not be negative"))
+    _check_lines(invoice, violations)
 
     if totals.has_exempt_sales and not (invoice.exemption_basis or "").strip():
         violations.append(
@@ -459,13 +382,6 @@ def _collect(
     mismatched = _total_findings(document, totals, violations)
     return violations, mismatched
 
-
-
-def _stamp(value: datetime) -> str:
-    """``DataWytworzeniaFa``: UTC, second precision, trailing ``Z`` (``xs:dateTime``)."""
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=UTC)
-    return value.astimezone(UTC).replace(microsecond=0).strftime(_STAMP_FORMAT)
 
 
 def _q(fmt: schemas.Fa3Format, name: str) -> str:
@@ -522,7 +438,7 @@ def _render(
         wersjaSchemy=fmt.wersja_schemy,
     )
     _add(header, fmt, "WariantFormularza", str(fmt.wariant_formularza))
-    _add(header, fmt, "DataWytworzeniaFa", _stamp(created_at))
+    _add(header, fmt, "DataWytworzeniaFa", stamp(created_at))
     _add(header, fmt, "SystemInfo", SYSTEM_INFO)
 
     _party(root, fmt, "Podmiot1", invoice.seller)
@@ -541,10 +457,10 @@ def _render(
 
     for total in totals.by_rate:
         slot = RATE_SLOTS[total.rate]
-        _add(body, fmt, slot.net_element, _money_text(total.net))
+        _add(body, fmt, slot.net_element, money_text(total.net))
         if slot.vat_element is not None:
-            _add(body, fmt, slot.vat_element, _money_text(total.vat))
-    _add(body, fmt, "P_15", _money_text(totals.gross))
+            _add(body, fmt, slot.vat_element, money_text(total.vat))
+    _add(body, fmt, "P_15", money_text(totals.gross))
 
     annotations = _add(body, fmt, "Adnotacje")
     for name in ("P_16", "P_17", "P_18", "P_18A"):
@@ -569,8 +485,8 @@ def _render(
         _add(row, fmt, "P_7", line.description.strip())
         _add(row, fmt, "P_8A", line.unit.strip())
         _add(row, fmt, "P_8B", format(line.quantity, "f"))
-        _add(row, fmt, "P_9A", _money_text(line.unit_net_price))
-        _add(row, fmt, "P_11", _money_text(line.net))
+        _add(row, fmt, "P_9A", money_text(line.unit_net_price))
+        _add(row, fmt, "P_11", money_text(line.net))
         _add(row, fmt, "P_12", RATE_SLOTS[line.rate].p12)
 
     ET.indent(root, space="  ")

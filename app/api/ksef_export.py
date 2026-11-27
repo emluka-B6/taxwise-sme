@@ -24,6 +24,7 @@ or an XML that fails structural/XSD validation (always with the full violation l
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Final
@@ -33,13 +34,14 @@ from fastapi import status as http_status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
+from app.api.export_utils import unprocessable
 from app.db.models import Document
 from app.db.session import get_session
 from app.domain.enums import DocumentType
 from app.integrations import schemas
 from app.integrations.ksef import fa3_builder, fa3_validate
 from app.integrations.ksef.fa3_builder import Fa3Error, Fa3Invoice
-from app.integrations.schemas import ValidationStatus
+from app.integrations.schemas import ValidationStatus, Violation
 from app.services import audit
 
 __all__ = ["Fa3InvoicePayload", "LineItemPayload", "PartyPayload", "router"]
@@ -162,15 +164,16 @@ def _headers(version: str, status: ValidationStatus) -> dict[str, str]:
 
 def _unprocessable(
     message: str,
-    violations: list[dict[str, str]],
+    violations: Sequence[Violation],
     *,
     version: str,
     status: ValidationStatus,
 ) -> HTTPException:
-    return HTTPException(
-        status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-        detail={"message": message, "violations": violations, "sent_to_ksef": False},
+    return unprocessable(
+        message,
+        violations,
         headers=_headers(version, status),
+        not_submitted_key="sent_to_ksef",
     )
 
 
@@ -217,7 +220,7 @@ def export_ksef_xml(
     except Fa3Error as exc:
         raise _unprocessable(
             str(exc),
-            [violation.as_dict() for violation in exc.violations],
+            exc.violations,
             version=fmt.version,
             status=ValidationStatus.SKIPPED,
         ) from exc
@@ -226,7 +229,7 @@ def export_ksef_xml(
     if structural:
         raise _unprocessable(
             "The generated XML failed structural FA(3) validation.",
-            [violation.as_dict() for violation in structural],
+            structural,
             version=fmt.version,
             status=ValidationStatus.SKIPPED,
         )
@@ -243,7 +246,7 @@ def export_ksef_xml(
         if validation.status is ValidationStatus.FAILED:
             raise _unprocessable(
                 "The generated XML does not conform to the configured FA(3) XSD.",
-                [violation.as_dict() for violation in validation.violations],
+                validation.violations,
                 version=fmt.version,
                 status=validation.status,
             )

@@ -19,20 +19,22 @@ bad input: unparseable XML is a violation too.
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Final
 
 from lxml import etree
 
+from app.domain.money import money
+from app.domain.nip import is_valid_nip
 from app.integrations import schemas
-from app.integrations.ksef.fa3_builder import RATE_SLOTS, VatRate, is_valid_nip
+from app.integrations.ksef.format import RATE_SLOTS, VatRate
 from app.integrations.schemas import Violation
+from app.integrations.xml_utils import XmlChecker, parse_date, parse_decimal
 
 __all__ = ["EXTRA_CHECKS", "validate_fa3"]
 
-_CENT: Final[Decimal] = Decimal("0.01")
 _ZERO: Final[Decimal] = Decimal("0.00")
 _KOD_WALUTY_RE: Final = re.compile(r"[A-Z]{3}")
 _KOD_KRAJU_RE: Final = re.compile(r"[A-Z]{2}")
@@ -50,29 +52,6 @@ EXTRA_CHECKS: Final[tuple[str, ...]] = (
 )
 
 
-def _money(value: Decimal) -> Decimal:
-    return value.quantize(_CENT, rounding=ROUND_HALF_UP)
-
-
-def _parse_decimal(text: str | None) -> Decimal | None:
-    if text is None or not text.strip():
-        return None
-    try:
-        value = Decimal(text.strip())
-    except InvalidOperation:
-        return None
-    return value if value.is_finite() else None
-
-
-def _parse_date(text: str | None) -> date | None:
-    if text is None:
-        return None
-    try:
-        return date.fromisoformat(text.strip())
-    except ValueError:
-        return None
-
-
 def _parse_timestamp(text: str | None) -> datetime | None:
     if text is None:
         return None
@@ -82,36 +61,18 @@ def _parse_timestamp(text: str | None) -> datetime | None:
         return None
 
 
-class _Checker:
+class _Checker(XmlChecker):
     """Walks one FA(3) document and accumulates :class:`Violation` objects."""
 
     def __init__(self, fmt: schemas.Fa3Format) -> None:
+        super().__init__(fmt.namespace)
         self.fmt = fmt
-        self.violations: list[Violation] = []
-
-    # -- helpers -----------------------------------------------------------------
-    def _q(self, name: str) -> str:
-        return f"{{{self.fmt.namespace}}}{name}"
-
-    def find(self, parent: etree._Element, name: str) -> etree._Element | None:
-        return parent.find(self._q(name))
 
     def text(self, parent: etree._Element, name: str) -> str | None:
-        element = self.find(parent, name)
-        if element is None or element.text is None:
-            return None
-        value = element.text.strip()
-        return value or None
+        # FA(3) presence checks treat an empty element as missing.
+        return super().text(parent, name) or None
 
-    def add(self, path: str, message: str) -> None:
-        self.violations.append(Violation(path=path, message=message))
-
-    def require(self, parent: etree._Element, name: str, path: str) -> str | None:
-        value = self.text(parent, name)
-        if value is None:
-            self.add(f"{path}/{name}", "required element is missing or empty")
-        return value
-
+    # -- helpers -----------------------------------------------------------------
     def money(self, parent: etree._Element, name: str, path: str) -> Decimal | None:
         raw = self.text(parent, name)
         if raw is None:
@@ -125,7 +86,7 @@ class _Checker:
         return self.money(parent, name, path)
 
     def _amount(self, raw: str, path: str) -> Decimal | None:
-        value = _parse_decimal(raw)
+        value = parse_decimal(raw)
         if value is None:
             self.add(path, f"{raw!r} is not a decimal amount")
             return None
@@ -134,7 +95,7 @@ class _Checker:
         exponent = value.as_tuple().exponent
         if isinstance(exponent, int) and exponent < -2:
             self.add(path, "amount must have at most two fraction digits")
-        return _money(value)
+        return money(value)
 
     # -- sections ----------------------------------------------------------------
     def header(self, root: etree._Element) -> None:
@@ -198,7 +159,7 @@ class _Checker:
                     self.add(f"{name}/{flag}", f"{flag} must be '1' or '2', got {value!r}")
 
     def lines(self, fa: etree._Element) -> tuple[dict[VatRate, Decimal], set[VatRate]]:
-        rows = fa.findall(self._q("FaWiersz"))
+        rows = fa.findall(self.qname("FaWiersz"))
         sums: dict[VatRate, Decimal] = {}
         seen: set[int] = set()
         if not rows:
@@ -225,7 +186,7 @@ class _Checker:
                 self.add(f"{path}/P_7", "description must not exceed 512 characters")
             self.require(row, "P_8A", path)
             quantity_raw = self.text(row, "P_8B")
-            quantity = _parse_decimal(quantity_raw)
+            quantity = parse_decimal(quantity_raw)
             if quantity_raw is None:
                 self.add(f"{path}/P_8B", "required quantity is missing")
             elif quantity is None or quantity <= _ZERO:
@@ -251,7 +212,7 @@ class _Checker:
         groups = 0
         for rate in VatRate:
             slot = RATE_SLOTS[rate]
-            expected_net = _money(sums.get(rate, _ZERO))
+            expected_net = money(sums.get(rate, _ZERO))
             net = self.optional_money(fa, slot.net_element, "Fa")
             if net is None:
                 if expected_net != _ZERO:
@@ -271,7 +232,7 @@ class _Checker:
             if slot.vat_element is None:
                 continue
             percent = rate.percent
-            expected_vat = _ZERO if percent is None else _money(expected_net * percent / 100)
+            expected_vat = _ZERO if percent is None else money(expected_net * percent / 100)
             vat = self.optional_money(fa, slot.vat_element, "Fa")
             if vat is None:
                 self.add(f"Fa/{slot.vat_element}", f"required amount is missing for {slot.p12}")
@@ -285,7 +246,7 @@ class _Checker:
                 )
         if groups == 0:
             self.add("Fa", "at least one P_13_* summary element is required")
-        return _money(written_net), _money(written_vat)
+        return money(written_net), money(written_vat)
 
     def annotations(self, fa: etree._Element, *, exempt: bool) -> None:
         block = self.find(fa, "Adnotacje")
@@ -345,7 +306,7 @@ class _Checker:
         if currency is not None and not _KOD_WALUTY_RE.fullmatch(currency):
             self.add("Fa/KodWaluty", f"{currency!r} is not a three-letter currency code")
         issued = self.require(fa, "P_1", "Fa")
-        if issued is not None and _parse_date(issued) is None:
+        if issued is not None and parse_date(issued) is None:
             self.add("Fa/P_1", f"{issued!r} is not an ISO-8601 date")
         place = self.text(fa, "P_1M")
         if place is not None and len(place) > 256:
@@ -354,7 +315,7 @@ class _Checker:
         if number is not None and len(number) > 256:
             self.add("Fa/P_2", "invoice number must not exceed 256 characters")
         sale_date = self.text(fa, "P_6")
-        if sale_date is not None and _parse_date(sale_date) is None:
+        if sale_date is not None and parse_date(sale_date) is None:
             self.add("Fa/P_6", f"{sale_date!r} is not an ISO-8601 date")
         kind = self.require(fa, "RodzajFaktury", "Fa")
         if kind is not None and kind not in _RODZAJ_FAKTURY:
@@ -364,11 +325,11 @@ class _Checker:
         net, vat = self.rate_groups(fa, sums)
         self.annotations(fa, exempt=VatRate.ZW in rates)
         total = self.money(fa, "P_15", "Fa")
-        if total is not None and total != _money(net + vat):
+        if total is not None and total != money(net + vat):
             self.add(
                 "Fa/P_15",
                 f"{total} does not match the sum of the P_13_*/P_14_* groups "
-                f"({_money(net + vat)})",
+                f"({money(net + vat)})",
             )
 
 
@@ -385,7 +346,7 @@ def validate_fa3(
     ``KodFormularza`` attributes are never duplicated in test or caller code.
     """
     expected_format = fmt or schemas.fa3_format(config_path=config_path)
-    parser = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False)
+    parser = schemas.safe_parser()
     try:
         root = etree.fromstring(xml_bytes, parser=parser)
     except etree.XMLSyntaxError as exc:

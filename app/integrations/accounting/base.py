@@ -31,6 +31,7 @@ from typing import Final, Protocol, runtime_checkable
 from pydantic import SecretStr
 
 from app.domain.enums import DocumentSource, DocumentType
+from app.domain.nip import is_valid_nip
 
 __all__ = [
     "DEFAULT_DATE_FORMATS",
@@ -192,7 +193,11 @@ def normalise_period(value: object | None, issue_date: date) -> str:
 
 
 def normalise_nip(value: object | None) -> str | None:
-    """Normalise a NIP to ten digits; ``None`` for an empty value."""
+    """Normalise a NIP to ten digits; ``None`` for an empty value.
+
+    The checksum is verified too, so an imported NIP is exactly as valid as one the
+    e-invoice builders accept.
+    """
     text = _text(value)
     if not text:
         return None
@@ -204,6 +209,8 @@ def normalise_nip(value: object | None) -> str | None:
     digits = re.sub(r"[\s-]", "", upper)
     if not digits.isdigit() or len(digits) != _NIP_DIGITS:
         raise InvoiceValidationError(f"NIP {text!r} must contain exactly ten digits")
+    if not is_valid_nip(digits):
+        raise InvoiceValidationError(f"NIP {text!r} is not a checksum-valid Polish NIP")
     return digits
 
 
